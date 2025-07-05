@@ -1,6 +1,6 @@
 streamlit
 opencv-python
-mediapipe==0.10.0
+mediapipe
 numpy
 pandas
 matplotlib
