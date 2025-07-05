@@ -6,3 +6,6 @@ pandas
 matplotlib
 streamlit-webrtc
 aiortc
+libgl1-mesa-glx
+libsm6
+libxrender1
