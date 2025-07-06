@@ -11,6 +11,7 @@ from aiortc.mediastreams import VideoFrame
 from typing import Union, List, Dict, Any
 import tempfile
 import os
+import io # Added for graph download functionality
 
 # --- Internal Constants for Moment Arm Derivation ---
 # These ratios are simplified and illustrative.
@@ -216,7 +217,7 @@ def process_video_file(uploaded_file, constants):
         image_rgb.flags.writeable = False
         results = pose.process(image_rgb)
         image_rgb.flags.writeable = True
-        image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+        image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_BGR2RGB) # Convert to RGB for st.image
 
         data_to_display = {
             "Knee Angle": 0, "Hip Angle": 0, "Back Angle": 0,
@@ -282,7 +283,7 @@ def process_video_file(uploaded_file, constants):
                                                       mp.solutions.drawing_utils.DrawingSpec(color=(245,66,230), thickness=2, circle_radius=2)
                                                      )
         
-        processed_frames.append(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)) # Store RGB for st.image
+        processed_frames.append(image_bgr) # Store RGB for st.image
         frame_idx += 1
         progress_bar.progress(frame_idx / frame_count)
 
@@ -458,7 +459,8 @@ def main():
                 help="Download the collected biomechanics data as a CSV file."
             )
             if st.button("Generate & Save Graph", key="graph_btn"):
-                if not st.session_state.analysis_running: # Only generate graph if live analysis is not running
+                # Ensure analysis is not running before generating graph
+                if not st.session_state.analysis_running: 
                     generate_and_display_graph(df_log, st.session_state.constants['age_years'])
                 else:
                     st.warning("Please stop the live analysis before generating a graph.")
@@ -677,7 +679,19 @@ def generate_and_display_graph(df_log: pd.DataFrame, age: int):
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.96])
     st.pyplot(fig) # Display the plot in Streamlit
-    plt.close(fig) # Close the figure to free up memory
+
+    # Save the figure to a BytesIO object for download
+    import io
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    st.download_button(
+        label="Download Graph as PNG",
+        data=buf.getvalue(),
+        file_name="squat_biomechanics_graph.png",
+        mime="image/png",
+        help="Download the generated graph as a PNG image."
+    )
+    plt.close(fig) # Ensure the figure is closed after saving and displaying
 
 if __name__ == "__main__":
     main()
