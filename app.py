@@ -1,4 +1,3 @@
-
 import streamlit as st
 import cv2
 import mediapipe as mp
@@ -8,10 +7,10 @@ import time
 import pandas as pd
 import matplotlib.pyplot as plt
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
-from aiortc.mediastreams import VideoFrame # Corrected import for VideoFrame
+from aiortc.mediastreams import VideoFrame
 from typing import Union, List, Dict, Any
 
-# --- Biomechanics Calculation Functions (from original app) ---
+# --- Biomechanics Calculation Functions ---
 def _calculate_angle(a, b, c):
     """Calculates the angle (in degrees) between three points a, b, and c, where b is the vertex."""
     ab = a - b
@@ -175,21 +174,11 @@ def main():
     st.title("🏋️ Real-Time Squat Biomechanics Analysis")
 
     # Initialize ALL session state variables unconditionally at the very top of main()
-    # This ensures they are always present when accessed, especially by the video processor factory.
     if 'constants' not in st.session_state:
         st.session_state.constants = {
-            'A_quad': 0.00006,
-            'A_glute': 0.00009,
-            'A_hamstring': 0.00007,
-            'A_erector_spinae': 0.00003,
-            'L0': 0.10,
-            'r_quad': 0.04,
-            'r_glute': 0.07,
-            'r_hamstring_hip': 0.06,
-            'r_erector_spinae': 0.05,
-            'r_external': 0.35,
-            'weight_kg': 100.0,
-            'phi_deg': 15.0,
+            'A_quad': 0.00006, 'A_glute': 0.00009, 'A_hamstring': 0.00007, 'A_erector_spinae': 0.00003,
+            'L0': 0.10, 'r_quad': 0.04, 'r_glute': 0.07, 'r_hamstring_hip': 0.06, 'r_erector_spinae': 0.05,
+            'r_external': 0.35, 'weight_kg': 100.0, 'phi_deg': 15.0,
             'phi': math.radians(15.0), # Calculated from phi_deg
             'delta_L_ratio': 0.08,
             'age_years': 30
@@ -207,8 +196,6 @@ def main():
         }
 
     # Create a local copy of constants to pass to the video processor factory.
-    # This ensures the dictionary is fully initialized when the lambda is defined.
-    # This copy is made *after* st.session_state.constants is guaranteed to be set.
     current_constants = st.session_state.constants.copy()
 
     # --- Sidebar for Controls and Constants ---
@@ -216,79 +203,64 @@ def main():
         st.header("⚙️ Settings & Controls")
 
         st.subheader("Basic Constants")
-        # Update session state constants directly via widgets
         st.session_state.constants['age_years'] = st.number_input(
-            "Age (years):",
-            min_value=0, max_value=150, value=st.session_state.constants['age_years'], step=1,
+            "Age (years):", min_value=0, max_value=150, value=st.session_state.constants['age_years'], step=1,
             help="Your age in years. Used to estimate a general physiological strain limit for tendons."
         )
         st.session_state.constants['weight_kg'] = st.number_input(
-            "Weight (kg):",
-            min_value=0.0, value=st.session_state.constants['weight_kg'], step=1.0, format="%.1f",
+            "Weight (kg):", min_value=0.0, value=st.session_state.constants['weight_kg'], step=1.0, format="%.1f",
             help="Enter the total weight being lifted (body weight + barbell weight)."
         )
         st.session_state.constants['r_external'] = st.number_input(
-            "External Moment Arm (m):",
-            min_value=0.0, value=st.session_state.constants['r_external'], step=0.01, format="%.2f",
+            "External Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_external'], step=0.01, format="%.2f",
             help="Distance from the joint (hip/knee) to the line of action of the external force. Adjust based on barbell position."
         )
         st.session_state.constants['phi_deg'] = st.number_input(
-            "Hip Abduction Angle (deg):",
-            min_value=0.0, max_value=90.0, value=st.session_state.constants['phi_deg'], step=1.0, format="%.1f",
+            "Hip Abduction Angle (deg):", min_value=0.0, max_value=90.0, value=st.session_state.constants['phi_deg'], step=1.0, format="%.1f",
             help="Angle representing the load's line of action relative to the body's sagital plane. Helps account for non-vertical force components."
         )
         st.session_state.constants['phi'] = math.radians(st.session_state.constants['phi_deg']) # Update phi_rad
 
         st.session_state.constants['r_quad'] = st.number_input(
-            "Quad Moment Arm (m):",
-            min_value=0.0, value=st.session_state.constants['r_quad'], step=0.01, format="%.2f",
+            "Quad Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_quad'], step=0.01, format="%.2f",
             help="Effective moment arm of the quadriceps muscle around the knee joint. A key factor in quadriceps force calculation."
         )
         st.session_state.constants['r_glute'] = st.number_input(
-            "Glute Moment Arm (m):",
-            min_value=0.0, value=st.session_state.constants['r_glute'], step=0.01, format="%.2f",
+            "Glute Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_glute'], step=0.01, format="%.2f",
             help="Effective moment arm of the gluteal muscles around the hip joint. Important for hip extension force."
         )
         st.session_state.constants['r_hamstring_hip'] = st.number_input(
-            "Hamstring Moment Arm (m):",
-            min_value=0.0, value=st.session_state.constants['r_hamstring_hip'], step=0.01, format="%.2f",
+            "Hamstring Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_hamstring_hip'], step=0.01, format="%.2f",
             help="Effective moment arm of the hamstrings around the hip joint (primarily for hip extension in squat)."
         )
         st.session_state.constants['r_erector_spinae'] = st.number_input(
-            "Erector Spinae Moment Arm (m):",
-            min_value=0.0, value=st.session_state.constants['r_erector_spinae'], step=0.01, format="%.2f",
+            "Erector Spinae Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_erector_spinae'], step=0.01, format="%.2f",
             help="Effective moment arm of the erector spinae (back muscles) around the hip joint, crucial for maintaining torso uprightness."
         )
 
         with st.expander("Advanced Anatomical Constants"):
             st.session_state.constants['A_quad'] = st.number_input(
-                "Quad Area (m²):",
-                min_value=0.0, value=st.session_state.constants['A_quad'], step=0.00001, format="%.5f",
+                "Quad Area (m²):", min_value=0.0, value=st.session_state.constants['A_quad'], step=0.00001, format="%.5f",
                 help="Physiological cross-sectional area of the quadriceps muscle. Larger area generally means higher force potential."
             )
             st.session_state.constants['A_glute'] = st.number_input(
-                "Glute Area (m²):",
-                min_value=0.0, value=st.session_state.constants['A_glute'], step=0.00001, format="%.5f",
+                "Glute Area (m²):", min_value=0.0, value=st.session_state.constants['A_glute'], step=0.00001, format="%.5f",
                 help="Physiological cross-sectional area of the gluteal muscles. Affects glute force and Young's Modulus."
             )
             st.session_state.constants['A_hamstring'] = st.number_input(
-                "Hamstring Area (m²):",
-                min_value=0.0, value=st.session_state.constants['A_hamstring'], step=0.00001, format="%.5f",
+                "Hamstring Area (m²):", min_value=0.0, value=st.session_state.constants['A_hamstring'], step=0.00001, format="%.5f",
                 help="Physiological cross-sectional area of the hamstring muscles. Influences hamstring force contribution."
             )
             st.session_state.constants['A_erector_spinae'] = st.number_input(
-                "Erector Spinae Area (m²):",
-                min_value=0.0, value=st.session_state.constants['A_erector_spinae'], step=0.00001, format="%.5f",
+                "Erector Spinae Area (m²):", min_value=0.0, value=st.session_state.constants['A_erector_spinae'], step=0.00001, format="%.5f",
                 help="Physiological cross-sectional area of the erector spinae muscles. Critical for back extensor force."
             )
             st.session_state.constants['L0'] = st.number_input(
-                "Resting Tendon Length (m):",
-                min_value=0.0, value=st.session_state.constants['L0'], step=0.01, format="%.2f",
+                "Resting Tendon Length (m):", min_value=0.0, value=st.session_state.constants['L0'], step=0.01, format="%.2f",
                 help="Initial, unstretched length of the muscle-tendon unit. Baseline for strain calculation."
             )
             st.session_state.constants['delta_L_ratio'] = st.number_input(
-                "Delta L Ratio:",
-                min_value=0.0, max_value=1.0, value=st.session_state.constants['delta_L_ratio'], step=0.01, format="%.2f",
+                "Delta L Ratio:", min_value=0.0, max_value=1.0, value=st.session_state.constants['delta_L_ratio'], step=0.01, format="%.2f",
                 help="Ratio of the change in tendon length to the resting length. Directly influences the calculated strain."
             )
 
@@ -337,10 +309,27 @@ def main():
     # Streamlit-WebRTC component for live video
     ctx = webrtc_streamer(
         key="squat-analysis",
-        # Pass the local copy of constants to the video processor factory
-        # This ensures the dictionary is fully initialized when the lambda is defined.
         video_processor_factory=lambda: SquatBiomechanicsProcessor(current_constants),
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        # --- IMPORTANT: Updated RTC Configuration with more STUN/TURN servers ---
+        rtc_configuration={
+            "iceServers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {"urls": ["stun:stun1.l.google.com:19302"]},
+                {"urls": ["stun:stun2.l.google.com:19302"]},
+                {"urls": ["stun:stun3.l.google.com:19302"]},
+                {"urls": ["stun:stun4.l.google.com:19302"]},
+                # Add more public STUN/TURN servers for better connectivity
+                {"urls": ["stun:global.stun.twilio.com:3478"]},
+                {"urls": ["stun:stun.nextcloud.com:3478"]},
+                {"urls": ["stun:stun.voip.blackberry.com:3478"]},
+                {"urls": ["stun:stun.sipgate.net:10000"]},
+                {"urls": ["stun:stun.ekiga.net:3478"]},
+                {"urls": ["stun:stun.ideasip.com:3478"]},
+                {"urls": ["stun:stun.schlund.de:3478"]},
+                {"urls": ["stun:stun.rixtelecom.se:3478"]},
+                {"urls": ["stun:stun.iptel.org:3478"]},
+            ]
+        },
         media_stream_constraints={"video": True, "audio": False},
         async_processing=True, # Process frames asynchronously
     )
@@ -350,7 +339,6 @@ def main():
         with metrics_placeholder.container():
             st.markdown("---")
             st.subheader("📊 Real-time Biomechanics Data")
-            # Ensure display_data is initialized even if not yet populated by processor
             display_data = st.session_state.get('data_to_display', {
                 "Knee Angle": 0, "Hip Angle": 0, "Back Angle": 0,
                 "Quad F": 0, "Glute F": 0, "Hamstring F": 0, "Back F": 0,
@@ -436,8 +424,8 @@ def generate_and_display_graph(df_log: pd.DataFrame, age: int):
     ax2.set_title('Strain')
     
     # Add horizontal line for estimated physiological strain limit
-    max_strain_limit = _estimate_max_physiological_strain(age)
-    ax2.axhline(y=max_strain_limit, color='red', linestyle='--', label=f'Estimated Max Strain for Age {age}: {max_strain_limit:.1f}%')
+    max_strain_limit = _estimate_max_physiological_strain(st.session_state.constants['age_years'])
+    ax2.axhline(y=max_strain_limit, color='red', linestyle='--', label=f'Estimated Max Strain for Age {st.session_state.constants["age_years"]}: {max_strain_limit:.1f}%')
     ax2.legend()
 
     # Young's Moduli
