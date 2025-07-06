@@ -1,11 +1,8 @@
 streamlit
-opencv-python
+opencv-python==4.8.0.76
 mediapipe
 numpy
 pandas
 matplotlib
 streamlit-webrtc
-aiortc
-libgl1-mesa-glx
-libsm6
-libxrender1
+aiortc==1.13.0
