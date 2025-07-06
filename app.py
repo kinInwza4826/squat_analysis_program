@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 from aiortc.mediastreams import VideoFrame
 from typing import Union, List, Dict, Any
+import tempfile
+import os
 
 # --- Biomechanics Calculation Functions ---
 def _calculate_angle(a, b, c):
@@ -44,7 +46,7 @@ def _estimate_max_physiological_strain(age):
     elif age < 60: return 3.0 # Middle-aged, decreased elasticity
     else: return 2.0 # Older, less elastic
 
-# --- Video Processor Class for Streamlit-WebRTC ---
+# --- Video Processor Class for Streamlit-WebRTC (for Live Camera) ---
 class SquatBiomechanicsProcessor(VideoProcessorBase):
     def __init__(self, constants: Dict[str, Any]):
         self.mp_pose = mp.solutions.pose
@@ -90,12 +92,9 @@ class SquatBiomechanicsProcessor(VideoProcessorBase):
                 ankle = np.array([landmarks[self.mp_pose.PoseLandmark.RIGHT_ANKLE].x,
                                   landmarks[self.mp_pose.PoseLandmark.RIGHT_ANKLE].y])
             except Exception as e:
-                # Use st.warning for messages that appear in the Streamlit app
                 st.warning(f"Partial landmark detection or error: {e}")
-                # Update display data even on error
-                if 'data_to_display' in st.session_state: # Check before updating
+                if 'data_to_display' in st.session_state:
                     st.session_state.data_to_display = data_to_display
-                # Draw landmarks if available, even if calculation failed
                 self._draw_landmarks(image_bgr, results)
                 return VideoFrame.from_ndarray(image_bgr, format="bgr24")
 
@@ -142,11 +141,9 @@ class SquatBiomechanicsProcessor(VideoProcessorBase):
                 "Back E": E_erector_spinae / 1e6 # Convert to MPa
             }
 
-            # Update session state for display in Streamlit UI
-            if 'data_to_display' in st.session_state: # Check before updating
+            if 'data_to_display' in st.session_state:
                 st.session_state.data_to_display = data_to_display
 
-            # Log data if analysis is running
             if st.session_state.get('analysis_running', False) and 'log_data' in st.session_state:
                 timestamp = time.time()
                 st.session_state.log_data.append([
@@ -155,7 +152,6 @@ class SquatBiomechanicsProcessor(VideoProcessorBase):
                     strain, E_quad, E_glute, E_hamstring, E_erector_spinae
                 ])
 
-            # Draw landmarks on the image
             self._draw_landmarks(image_bgr, results)
 
         return VideoFrame.from_ndarray(image_bgr, format="bgr24")
@@ -167,6 +163,127 @@ class SquatBiomechanicsProcessor(VideoProcessorBase):
                                                       mp.solutions.drawing_utils.DrawingSpec(color=(245,117,66), thickness=2, circle_radius=2),
                                                       mp.solutions.drawing_utils.DrawingSpec(color=(245,66,230), thickness=2, circle_radius=2)
                                                      )
+
+# --- Video File Processor Function ---
+def process_video_file(uploaded_file, constants):
+    mp_pose = mp.solutions.pose
+    pose = mp_pose.Pose()
+
+    tfile = tempfile.NamedTemporaryFile(delete=False)
+    tfile.write(uploaded_file.read())
+    video_path = tfile.name
+    tfile.close()
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        st.error("Error: Could not open video file.")
+        os.unlink(video_path)
+        return [], []
+
+    processed_frames = []
+    log_data_file = []
+    start_time = time.time()
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    
+    st.info(f"Processing video: {uploaded_file.name} (Total frames: {frame_count}, FPS: {fps:.2f})")
+    progress_bar = st.progress(0)
+    frame_idx = 0
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image_rgb.flags.writeable = False
+        results = pose.process(image_rgb)
+        image_rgb.flags.writeable = True
+        image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+
+        data_to_display = {
+            "Knee Angle": 0, "Hip Angle": 0, "Back Angle": 0,
+            "Quad F": 0, "Glute F": 0, "Hamstring F": 0, "Back F": 0,
+            "Strain": 0,
+            "Quad E": 0, "Glute E": 0, "Hamstring E": 0, "Back E": 0
+        }
+
+        if results.pose_landmarks:
+            landmarks = results.pose_landmarks.landmark
+            try:
+                shoulder = np.array([landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER].x, landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER].y])
+                hip = np.array([landmarks[mp_pose.PoseLandmark.RIGHT_HIP].x, landmarks[mp_pose.PoseLandmark.RIGHT_HIP].y])
+                knee = np.array([landmarks[mp_pose.PoseLandmark.RIGHT_KNEE].x, landmarks[mp_pose.PoseLandmark.RIGHT_KNEE].y])
+                ankle = np.array([landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE].x, landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE].y])
+            except Exception:
+                pass # Skip biomechanics if landmarks are incomplete
+
+            if all(v is not None for v in [shoulder, hip, knee, ankle]): # Ensure all points are detected
+                knee_angle = _calculate_angle(hip, knee, ankle)
+                hip_angle = _calculate_angle(shoulder, hip, knee)
+                back_angle = _calculate_angle(shoulder, hip, knee)
+
+                theta_knee = math.radians(180 - knee_angle)
+                theta_hip = math.radians(180 - hip_angle)
+
+                F_external = (constants['weight_kg'] * 9.81) / 2 
+                phi_rad = constants['phi']
+                F_parallel = F_external * math.cos(phi_rad)
+
+                tau_knee = F_parallel * constants['r_external']
+                tau_hip = F_parallel * constants['r_external']
+
+                F_quad = _calculate_force(tau_knee, constants['r_quad'], theta_knee)
+                F_glute = _calculate_force(tau_hip, constants['r_glute'], theta_hip)
+                F_hamstring = _calculate_force(tau_hip, constants['r_hamstring_hip'], theta_hip)
+                F_erector_spinae = _calculate_force(tau_hip, constants['r_erector_spinae'], theta_hip)
+
+                delta_L = constants['L0'] * constants['delta_L_ratio']
+                strain = delta_L / constants['L0'] if constants['L0'] != 0 else 0
+
+                E_quad = _calculate_young_modulus(F_quad, constants['L0'], constants['A_quad'], delta_L)
+                E_glute = _calculate_young_modulus(F_glute, constants['L0'], constants['A_glute'], delta_L)
+                E_hamstring = _calculate_young_modulus(F_hamstring, constants['L0'], constants['A_hamstring'], delta_L)
+                E_erector_spinae = _calculate_young_modulus(F_erector_spinae, constants['L0'], constants['A_erector_spinae'], delta_L)
+
+                data_to_display = {
+                    "Knee Angle": int(knee_angle),
+                    "Hip Angle": int(hip_angle),
+                    "Back Angle": int(back_angle),
+                    "Quad F": int(F_quad),
+                    "Glute F": int(F_glute),
+                    "Hamstring F": int(F_hamstring),
+                    "Back F": int(F_erector_spinae),
+                    "Strain": strain * 100, # Convert to percentage
+                    "Quad E": E_quad / 1e6, # Convert to MPa
+                    "Glute E": E_glute / 1e6, # Convert to MPa
+                    "Hamstring E": E_hamstring / 1e6, # Convert to MPa
+                    "Back E": E_erector_spinae / 1e6 # Convert to MPa
+                }
+                
+                log_data_file.append([
+                    time.time() - start_time, knee_angle, hip_angle, back_angle,
+                    F_quad, F_glute, F_hamstring, F_erector_spinae,
+                    strain, E_quad, E_glute, E_hamstring, E_erector_spinae
+                ])
+
+            # Draw landmarks
+            mp.solutions.drawing_utils.draw_landmarks(image_bgr, results.pose_landmarks,
+                                                      mp_pose.POSE_CONNECTIONS,
+                                                      mp.solutions.drawing_utils.DrawingSpec(color=(245,117,66), thickness=2, circle_radius=2),
+                                                      mp.solutions.drawing_utils.DrawingSpec(color=(245,66,230), thickness=2, circle_radius=2)
+                                                     )
+        
+        processed_frames.append(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)) # Store RGB for st.image
+        frame_idx += 1
+        progress_bar.progress(frame_idx / frame_count)
+
+    cap.release()
+    pose.close()
+    os.unlink(video_path) # Clean up temporary file
+    st.success("Video processing complete!")
+    return processed_frames, log_data_file
 
 # --- Streamlit App Layout ---
 def main():
@@ -194,6 +311,10 @@ def main():
             "Strain": 0,
             "Quad E": 0, "Glute E": 0, "Hamstring E": 0, "Back E": 0
         }
+    if 'processed_video_frames' not in st.session_state:
+        st.session_state.processed_video_frames = []
+    if 'processed_video_log_data' not in st.session_state:
+        st.session_state.processed_video_log_data = []
 
     # Create a local copy of constants to pass to the video processor factory.
     current_constants = st.session_state.constants.copy()
@@ -201,6 +322,11 @@ def main():
     # --- Sidebar for Controls and Constants ---
     with st.sidebar:
         st.header("⚙️ Settings & Controls")
+
+        analysis_mode = st.radio(
+            "Choose Analysis Mode:",
+            ("Live Camera Analysis", "Upload Video for Analysis")
+        )
 
         st.subheader("Basic Constants")
         st.session_state.constants['age_years'] = st.number_input(
@@ -265,20 +391,49 @@ def main():
             )
 
         st.subheader("Control Analysis")
-        col1_btn, col2_btn = st.columns(2)
-        with col1_btn:
-            if st.button("Start Analysis", key="start_btn"):
-                st.session_state.analysis_running = True
-                st.session_state.log_data = [] # Clear previous data on start
-                st.success("Analysis started! Perform your squats.")
-        with col2_btn:
-            if st.button("Stop Analysis", key="stop_btn"):
-                st.session_state.analysis_running = False
-                st.info("Analysis stopped. You can now save data.")
+        # Buttons for Live Camera Mode
+        if analysis_mode == "Live Camera Analysis":
+            col1_btn, col2_btn = st.columns(2)
+            with col1_btn:
+                if st.button("Start Live Analysis", key="start_live_btn"):
+                    st.session_state.analysis_running = True
+                    st.session_state.log_data = [] # Clear previous data on start
+                    st.session_state.processed_video_frames = [] # Clear processed video data
+                    st.session_state.processed_video_log_data = []
+                    st.success("Live analysis started! Perform your squats.")
+            with col2_btn:
+                if st.button("Stop Live Analysis", key="stop_live_btn"):
+                    st.session_state.analysis_running = False
+                    st.info("Live analysis stopped. You can now save data.")
+        # Button for Video Upload Mode
+        else: # analysis_mode == "Upload Video for Analysis"
+            uploaded_file = st.file_uploader("Upload a video file (.mp4)", type=["mp4"])
+            if uploaded_file is not None:
+                if st.button("Analyze Uploaded Video", key="analyze_uploaded_video_btn"):
+                    st.session_state.analysis_running = False # Ensure live analysis is off
+                    st.session_state.log_data = [] # Clear live data
+                    st.session_state.processed_video_frames = [] # Clear previous processed video
+                    st.session_state.processed_video_log_data = []
+                    
+                    with st.spinner("Processing video... This may take a while depending on video length."):
+                        processed_frames, processed_log_data = process_video_file(uploaded_file, current_constants)
+                        st.session_state.processed_video_frames = processed_frames
+                        st.session_state.processed_video_log_data = processed_log_data
+                    st.success("Video analysis complete! See results below.")
+            else:
+                st.write("Upload a video to begin analysis.")
+
 
         st.subheader("Save Options")
-        if st.session_state.log_data:
-            df_log = pd.DataFrame(st.session_state.log_data, columns=[
+        # Determine which log data to use for saving/graphing
+        data_to_save = []
+        if analysis_mode == "Live Camera Analysis" and st.session_state.log_data:
+            data_to_save = st.session_state.log_data
+        elif analysis_mode == "Upload Video for Analysis" and st.session_state.processed_video_log_data:
+            data_to_save = st.session_state.processed_video_log_data
+
+        if data_to_save:
+            df_log = pd.DataFrame(data_to_save, columns=[
                 "Time", "Knee Angle (deg)", "Hip Angle (deg)", "Back Angle (deg)",
                 "Quad Force (N)", "Glute Force (N)", "Hamstring Force (N)", "Back Force (N)",
                 "Strain", "Quad Young Modulus (Pa)", "Glute Young Modulus (Pa)",
@@ -293,108 +448,164 @@ def main():
                 help="Download the collected biomechanics data as a CSV file."
             )
             if st.button("Generate & Save Graph", key="graph_btn"):
-                if not st.session_state.analysis_running:
+                if not st.session_state.analysis_running: # Only generate graph if live analysis is not running
                     generate_and_display_graph(df_log, st.session_state.constants['age_years'])
                 else:
-                    st.warning("Please stop the analysis before generating a graph.")
+                    st.warning("Please stop the live analysis before generating a graph.")
         else:
             st.write("No data collected yet to save.")
 
     # --- Main Content Area ---
-    st.subheader("Live Camera Feed & Real-time Data")
+    st.subheader("Live Camera Feed / Processed Video & Real-time Data")
     
     # Use a placeholder for real-time metrics
     metrics_placeholder = st.empty()
+    video_placeholder = st.empty() # Placeholder for video display
 
-    # Streamlit-WebRTC component for live video
-    ctx = webrtc_streamer(
-        key="squat-analysis",
-        video_processor_factory=lambda: SquatBiomechanicsProcessor(current_constants),
-        # --- IMPORTANT: Updated RTC Configuration with more STUN/TURN servers ---
-        rtc_configuration={
-            "iceServers": [
-                {"urls": ["stun:stun.l.google.com:19302"]},
-                {"urls": ["stun:stun1.l.google.com:19302"]},
-                {"urls": ["stun:stun2.l.google.com:19302"]},
-                {"urls": ["stun:stun3.l.google.com:19302"]},
-                {"urls": ["stun:stun4.l.google.com:19302"]},
-                # Add more public STUN/TURN servers for better connectivity
-                {"urls": ["stun:global.stun.twilio.com:3478"]},
-                {"urls": ["stun:stun.nextcloud.com:3478"]},
-                {"urls": ["stun:stun.voip.blackberry.com:3478"]},
-                {"urls": ["stun:stun.sipgate.net:10000"]},
-                {"urls": ["stun:stun.ekiga.net:3478"]},
-                {"urls": ["stun:stun.ideasip.com:3478"]},
-                {"urls": ["stun:stun.schlund.de:3478"]},
-                {"urls": ["stun:stun.rixtelecom.se:3478"]},
-                {"urls": ["stun:stun.iptel.org:3478"]},
-            ]
-        },
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True, # Process frames asynchronously
-    )
+    if analysis_mode == "Live Camera Analysis":
+        ctx = webrtc_streamer(
+            key="squat-analysis",
+            video_processor_factory=lambda: SquatBiomechanicsProcessor(current_constants),
+            rtc_configuration={
+                "iceServers": [
+                    {"urls": ["stun:stun.l.google.com:19302"]},
+                    {"urls": ["stun:stun1.l.google.com:19302"]},
+                    {"urls": ["stun:stun2.l.google.com:19302"]},
+                    {"urls": ["stun:stun3.l.google.com:19302"]},
+                    {"urls": ["stun:stun4.l.google.com:19302"]},
+                    {"urls": ["stun:global.stun.twilio.com:3478"]},
+                    {"urls": ["stun:stun.nextcloud.com:3478"]},
+                    {"urls": ["stun:stun.voip.blackberry.com:3478"]},
+                    {"urls": ["stun:stun.sipgate.net:10000"]},
+                    {"urls": ["stun:stun.ekiga.net:3478"]},
+                    {"urls": ["stun:stun.ideasip.com:3478"]},
+                    {"urls": ["stun:stun.schlund.de:3478"]},
+                    {"urls": ["stun:stun.rixtelecom.se:3478"]},
+                    {"urls": ["stun:stun.iptel.org:3478"]},
+                ]
+            },
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True,
+        )
 
-    # Update real-time metrics in the placeholder
-    if ctx.state.playing:
-        with metrics_placeholder.container():
+        if ctx.state.playing:
+            with metrics_placeholder.container():
+                st.markdown("---")
+                st.subheader("📊 Real-time Biomechanics Data (Live)")
+                display_data = st.session_state.get('data_to_display', {
+                    "Knee Angle": 0, "Hip Angle": 0, "Back Angle": 0,
+                    "Quad F": 0, "Glute F": 0, "Hamstring F": 0, "Back F": 0,
+                    "Strain": 0,
+                    "Quad E": 0, "Glute E": 0, "Hamstring E": 0, "Back E": 0
+                })
+                
+                col_angle1, col_angle2, col_angle3 = st.columns(3)
+                with col_angle1:
+                    st.metric("Knee Angle (deg)", f"{display_data.get('Knee Angle', 'N/A')}")
+                with col_angle2:
+                    st.metric("Hip Angle (deg)", f"{display_data.get('Hip Angle', 'N/A')}")
+                with col_angle3:
+                    st.metric("Back Angle (deg)", f"{display_data.get('Back Angle', 'N/A')}")
+
+                st.markdown("---")
+                col_force1, col_force2, col_force3, col_force4 = st.columns(4)
+                with col_force1:
+                    st.metric("Quad Force (N)", f"{display_data.get('Quad F', 'N/A')}")
+                with col_force2:
+                    st.metric("Glute Force (N)", f"{display_data.get('Glute F', 'N/A')}")
+                with col_force3:
+                    st.metric("Hamstring Force (N)", f"{display_data.get('Hamstring F', 'N/A')}")
+                with col_force4:
+                    st.metric("Back Force (N)", f"{display_data.get('Back F', 'N/A')}")
+                
+                st.markdown("---")
+                st.metric("Strain (%)", f"{display_data.get('Strain', 'N/A'):.2f}")
+
+                st.markdown("---")
+                col_modulus1, col_modulus2, col_modulus3, col_modulus4 = st.columns(4)
+                with col_modulus1:
+                    st.metric("Quad Young Modulus (MPa)", f"{display_data.get('Quad E', 'N/A'):.2f}")
+                with col_modulus2:
+                    st.metric("Glute Young Modulus (MPa)", f"{display_data.get('Glute E', 'N/A'):.2f}")
+                with col_modulus3:
+                    st.metric("Hamstring Young Modulus (MPa)", f"{display_data.get('Hamstring E', 'N/A'):.2f}")
+                with col_modulus4:
+                    st.metric("Back Young Modulus (MPa)", f"{display_data.get('Back E', 'N/A'):.2f}")
+                st.markdown("---")
+        else:
+            st.info("Click 'Start Live Analysis' in the sidebar and allow webcam access to begin.")
+            st.session_state.analysis_running = False
+
             st.markdown("---")
-            st.subheader("📊 Real-time Biomechanics Data")
-            display_data = st.session_state.get('data_to_display', {
-                "Knee Angle": 0, "Hip Angle": 0, "Back Angle": 0,
-                "Quad F": 0, "Glute F": 0, "Hamstring F": 0, "Back F": 0,
-                "Strain": 0,
-                "Quad E": 0, "Glute E": 0, "Hamstring E": 0, "Back E": 0
-            })
+            st.subheader("Troubleshooting Camera Connection")
+            st.write("""
+                If your camera feed is not appearing or you see a "Connection is taking longer than expected" message, please try the following:
+                1.  **Check your internet connection:** Ensure it's stable and strong.
+                2.  **Allow camera access:** Make sure your browser has permission to access your webcam. Look for a pop-up or icon in your browser's address bar.
+                3.  **Close other apps using the camera:** Only one application can use the camera at a time.
+                4.  **Try a different browser:** Sometimes, browser-specific settings can interfere.
+                5.  **Test from a different network:** If possible, try accessing the app from a different Wi-Fi network or a mobile hotspot. Strict network firewalls can block real-time video connections.
+                6.  **Restart the app:** Refresh the Streamlit page in your browser.
+            """)
+    else: # analysis_mode == "Upload Video for Analysis"
+        if st.session_state.processed_video_frames:
+            st.subheader("Processed Video Playback")
+            # Display processed video frames
+            st.image(st.session_state.processed_video_frames[0], channels="RGB", use_column_width=True)
+            # A simple way to "play" the video by iterating through frames
+            # For a more interactive player, you might need a custom component or save to a temp video file.
             
-            col_angle1, col_angle2, col_angle3 = st.columns(3)
-            with col_angle1:
-                st.metric("Knee Angle (deg)", f"{display_data.get('Knee Angle', 'N/A')}")
-            with col_angle2:
-                st.metric("Hip Angle (deg)", f"{display_data.get('Hip Angle', 'N/A')}")
-            with col_angle3:
-                st.metric("Back Angle (deg)", f"{display_data.get('Back Angle', 'N/A')}")
+            st.subheader("📊 Biomechanics Data from Uploaded Video")
+            df_processed_log = pd.DataFrame(st.session_state.processed_video_log_data, columns=[
+                "Time", "Knee Angle (deg)", "Hip Angle (deg)", "Back Angle (deg)",
+                "Quad Force (N)", "Glute Force (N)", "Hamstring Force (N)", "Back Force (N)",
+                "Strain", "Quad Young Modulus (Pa)", "Glute Young Modulus (Pa)",
+                "Hamstring Young Modulus (Pa)", "Back Young Modulus (Pa)"
+            ])
+            st.dataframe(df_processed_log) # Display as a dataframe
 
-            st.markdown("---")
-            col_force1, col_force2, col_force3, col_force4 = st.columns(4)
-            with col_force1:
-                st.metric("Quad Force (N)", f"{display_data.get('Quad F', 'N/A')}")
-            with col_force2:
-                st.metric("Glute Force (N)", f"{display_data.get('Glute F', 'N/A')}")
-            with col_force3:
-                st.metric("Hamstring Force (N)", f"{display_data.get('Hamstring F', 'N/A')}")
-            with col_force4:
-                st.metric("Back Force (N)", f"{display_data.get('Back F', 'N/A')}")
-            
-            st.markdown("---")
-            st.metric("Strain (%)", f"{display_data.get('Strain', 'N/A'):.2f}")
+            # Display real-time like metrics for the last frame of the processed video
+            if not df_processed_log.empty:
+                display_data = df_processed_log.iloc[-1].to_dict() # Get last row as dict for display
+                st.markdown("---")
+                st.subheader("Last Frame Biomechanics Summary")
+                col_angle1, col_angle2, col_angle3 = st.columns(3)
+                with col_angle1:
+                    st.metric("Knee Angle (deg)", f"{display_data.get('Knee Angle (deg)', 'N/A'):.0f}")
+                with col_angle2:
+                    st.metric("Hip Angle (deg)", f"{display_data.get('Hip Angle (deg)', 'N/A'):.0f}")
+                with col_angle3:
+                    st.metric("Back Angle (deg)", f"{display_data.get('Back Angle (deg)', 'N/A'):.0f}")
 
-            st.markdown("---")
-            col_modulus1, col_modulus2, col_modulus3, col_modulus4 = st.columns(4)
-            with col_modulus1:
-                st.metric("Quad Young Modulus (MPa)", f"{display_data.get('Quad E', 'N/A'):.2f}")
-            with col_modulus2:
-                st.metric("Glute Young Modulus (MPa)", f"{display_data.get('Glute E', 'N/A'):.2f}")
-            with col_modulus3:
-                st.metric("Hamstring Young Modulus (MPa)", f"{display_data.get('Hamstring E', 'N/A'):.2f}")
-            with col_modulus4:
-                st.metric("Back Young Modulus (MPa)", f"{display_data.get('Back E', 'N/A'):.2f}")
-            st.markdown("---")
-    else:
-        st.info("Click 'Start Analysis' in the sidebar and allow webcam access to begin.")
-        st.session_state.analysis_running = False # Ensure analysis is off if video is not playing
+                st.markdown("---")
+                col_force1, col_force2, col_force3, col_force4 = st.columns(4)
+                with col_force1:
+                    st.metric("Quad Force (N)", f"{display_data.get('Quad Force (N)', 'N/A'):.0f}")
+                with col_force2:
+                    st.metric("Glute Force (N)", f"{display_data.get('Glute Force (N)', 'N/A'):.0f}")
+                with col_force3:
+                    st.metric("Hamstring Force (N)", f"{display_data.get('Hamstring Force (N)', 'N/A'):.0f}")
+                with col_force4:
+                    st.metric("Back Force (N)", f"{display_data.get('Back Force (N)', 'N/A'):.0f}")
+                
+                st.markdown("---")
+                st.metric("Strain (%)", f"{display_data.get('Strain', 'N/A'):.2f}")
 
-        # Add troubleshooting tips if the camera hasn't started
-        st.markdown("---")
-        st.subheader("Troubleshooting Camera Connection")
-        st.write("""
-            If your camera feed is not appearing or you see a "Connection is taking longer than expected" message, please try the following:
-            1.  **Check your internet connection:** Ensure it's stable and strong.
-            2.  **Allow camera access:** Make sure your browser has permission to access your webcam. Look for a pop-up or icon in your browser's address bar.
-            3.  **Close other apps using the camera:** Only one application can use the camera at a time.
-            4.  **Try a different browser:** Sometimes, browser-specific settings can interfere.
-            5.  **Test from a different network:** If possible, try accessing the app from a different Wi-Fi network or a mobile hotspot. Strict network firewalls can block real-time video connections.
-            6.  **Restart the app:** Refresh the Streamlit page in your browser.
-        """)
+                st.markdown("---")
+                col_modulus1, col_modulus2, col_modulus3, col_modulus4 = st.columns(4)
+                with col_modulus1:
+                    st.metric("Quad Young Modulus (MPa)", f"{display_data.get('Quad Young Modulus (Pa)', 'N/A') / 1e6:.2f}")
+                with col_modulus2:
+                    st.metric("Glute Young Modulus (MPa)", f"{display_data.get('Glute Young Modulus (Pa)', 'N/A') / 1e6:.2f}")
+                with col_modulus3:
+                    st.metric("Hamstring Young Modulus (MPa)", f"{display_data.get('Hamstring Young Modulus (Pa)', 'N/A') / 1e6:.2f}")
+                with col_modulus4:
+                    st.metric("Back Young Modulus (MPa)", f"{display_data.get('Back Young Modulus (Pa)', 'N/A') / 1e6:.2f}")
+                st.markdown("---")
+
+        else:
+            st.info("Upload a video file in the sidebar to analyze your squat.")
+
 
 def generate_and_display_graph(df_log: pd.DataFrame, age: int):
     """Generates and displays biomechanics graphs."""
