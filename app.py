@@ -9,8 +9,6 @@ import matplotlib.pyplot as plt
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 from aiortc.mediastreams import VideoFrame
 from typing import Union, List, Dict, Any
-import tempfile
-import os
 
 # --- Biomechanics Calculation Functions ---
 def _calculate_angle(a, b, c):
@@ -46,16 +44,12 @@ def _estimate_max_physiological_strain(age):
     elif age < 60: return 3.0 # Middle-aged, decreased elasticity
     else: return 2.0 # Older, less elastic
 
-# --- Video Processor Class for Streamlit-WebRTC (for Live Camera) ---
+# --- Video Processor Class for Streamlit-WebRTC ---
 class SquatBiomechanicsProcessor(VideoProcessorBase):
     def __init__(self, constants: Dict[str, Any]):
         self.mp_pose = mp.solutions.pose
         self.pose = self.mp_pose.Pose()
-        self.constants = constants
-        
-        # log_data and data_to_display are managed in st.session_state in the main thread
-        # The processor only needs to update st.session_state
-        pass 
+        self.constants = constants # Now 'constants' will contain both basic and advanced inputs
 
     def recv(self, frame: VideoFrame) -> VideoFrame:
         image = frame.to_ndarray(format="bgr24")
@@ -77,6 +71,26 @@ class SquatBiomechanicsProcessor(VideoProcessorBase):
             "Strain": 0,
             "Quad E": 0, "Glute E": 0, "Hamstring E": 0, "Back E": 0
         }
+
+        # Determine the external moment arm to use
+        # If the user has explicitly set r_external in advanced settings, use that.
+        # Otherwise, calculate it dynamically based on femur length.
+        # Note: self.constants.get('r_external', default_value) fetches the value from session_state.constants
+        # The default value here (0.35) should match the initial default set in main() for r_external.
+        r_external_user_input = self.constants.get('r_external', 0.35) 
+
+        # Check if the user's r_external is still the default (meaning they haven't touched the advanced input).
+        # If it's the default AND femur_length_m is provided, use the derived value.
+        # This allows femur_length_m to influence r_external unless explicitly overridden.
+        if math.isclose(r_external_user_input, 0.35) and self.constants.get('femur_length_m', 0) > 0.01:
+            r_external_used = self.constants['femur_length_m'] * 0.35
+            if r_external_used == 0: r_external_used = 0.35 # Fallback if calculated value is zero
+        else:
+            r_external_used = r_external_user_input # Use the user's explicit advanced input
+
+        # Safety fallback: ensure r_external_used is not zero
+        if r_external_used == 0: r_external_used = 0.35
+
 
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
@@ -107,24 +121,30 @@ class SquatBiomechanicsProcessor(VideoProcessorBase):
             theta_hip = math.radians(180 - hip_angle)
 
             F_external = (self.constants['weight_kg'] * 9.81) / 2 
-            phi_rad = self.constants['phi']
+            # Use phi_deg from constants, convert to radians
+            phi_rad = math.radians(self.constants.get('phi_deg', 15.0)) 
             F_parallel = F_external * math.cos(phi_rad)
 
-            tau_knee = F_parallel * self.constants['r_external']
-            tau_hip = F_parallel * self.constants['r_external']
+            tau_knee = F_parallel * r_external_used # Use the determined r_external_used
+            tau_hip = F_parallel * r_external_used # Use the determined r_external_used
 
-            F_quad = _calculate_force(tau_knee, self.constants['r_quad'], theta_knee)
-            F_glute = _calculate_force(tau_hip, self.constants['r_glute'], theta_hip)
-            F_hamstring = _calculate_force(tau_hip, self.constants['r_hamstring_hip'], theta_hip)
-            F_erector_spinae = _calculate_force(tau_hip, self.constants['r_erector_spinae'], theta_hip)
+            # Use moment arms from constants (user-adjustable or default)
+            F_quad = _calculate_force(tau_knee, self.constants.get('r_quad', 0.04), theta_knee)
+            F_glute = _calculate_force(tau_hip, self.constants.get('r_glute', 0.07), theta_hip)
+            F_hamstring = _calculate_force(tau_hip, self.constants.get('r_hamstring_hip', 0.06), theta_hip)
+            F_erector_spinae = _calculate_force(tau_hip, self.constants.get('r_erector_spinae', 0.05), theta_hip)
 
-            delta_L = self.constants['L0'] * self.constants['delta_L_ratio']
-            strain = delta_L / self.constants['L0'] if self.constants['L0'] != 0 else 0
+            # Use L0 and delta_L_ratio from constants (user-adjustable or default)
+            L0_val = self.constants.get('L0', 0.10)
+            delta_L_ratio_val = self.constants.get('delta_L_ratio', 0.08)
+            delta_L = L0_val * delta_L_ratio_val 
+            strain = delta_L / L0_val if L0_val != 0 else 0
 
-            E_quad = _calculate_young_modulus(F_quad, self.constants['L0'], self.constants['A_quad'], delta_L)
-            E_glute = _calculate_young_modulus(F_glute, self.constants['L0'], self.constants['A_glute'], delta_L)
-            E_hamstring = _calculate_young_modulus(F_hamstring, self.constants['L0'], self.constants['A_hamstring'], delta_L)
-            E_erector_spinae = _calculate_young_modulus(F_erector_spinae, self.constants['L0'], self.constants['A_erector_spinae'], delta_L)
+            # Use areas from constants (user-adjustable or default)
+            E_quad = _calculate_young_modulus(F_quad, L0_val, self.constants.get('A_quad', 0.00006), delta_L)
+            E_glute = _calculate_young_modulus(F_glute, L0_val, self.constants.get('A_glute', 0.00009), delta_L)
+            E_hamstring = _calculate_young_modulus(F_hamstring, L0_val, self.constants.get('A_hamstring', 0.00007), delta_L)
+            E_erector_spinae = _calculate_young_modulus(F_erector_spinae, L0_val, self.constants.get('A_erector_spinae', 0.00003), delta_L)
 
             data_to_display = {
                 "Knee Angle": int(knee_angle),
@@ -164,127 +184,6 @@ class SquatBiomechanicsProcessor(VideoProcessorBase):
                                                       mp.solutions.drawing_utils.DrawingSpec(color=(245,66,230), thickness=2, circle_radius=2)
                                                      )
 
-# --- Video File Processor Function ---
-def process_video_file(uploaded_file, constants):
-    mp_pose = mp.solutions.pose
-    pose = mp_pose.Pose()
-
-    tfile = tempfile.NamedTemporaryFile(delete=False)
-    tfile.write(uploaded_file.read())
-    video_path = tfile.name
-    tfile.close()
-
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        st.error("Error: Could not open video file.")
-        os.unlink(video_path)
-        return [], []
-
-    processed_frames = []
-    log_data_file = []
-    start_time = time.time()
-
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    
-    st.info(f"Processing video: {uploaded_file.name} (Total frames: {frame_count}, FPS: {fps:.2f})")
-    progress_bar = st.progress(0)
-    frame_idx = 0
-
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image_rgb.flags.writeable = False
-        results = pose.process(image_rgb)
-        image_rgb.flags.writeable = True
-        image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
-
-        data_to_display = {
-            "Knee Angle": 0, "Hip Angle": 0, "Back Angle": 0,
-            "Quad F": 0, "Glute F": 0, "Hamstring F": 0, "Back F": 0,
-            "Strain": 0,
-            "Quad E": 0, "Glute E": 0, "Hamstring E": 0, "Back E": 0
-        }
-
-        if results.pose_landmarks:
-            landmarks = results.pose_landmarks.landmark
-            try:
-                shoulder = np.array([landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER].x, landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER].y])
-                hip = np.array([landmarks[mp_pose.PoseLandmark.RIGHT_HIP].x, landmarks[mp_pose.PoseLandmark.RIGHT_HIP].y])
-                knee = np.array([landmarks[mp_pose.PoseLandmark.RIGHT_KNEE].x, landmarks[mp_pose.PoseLandmark.RIGHT_KNEE].y])
-                ankle = np.array([landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE].x, landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE].y])
-            except Exception:
-                pass # Skip biomechanics if landmarks are incomplete
-
-            if all(v is not None for v in [shoulder, hip, knee, ankle]): # Ensure all points are detected
-                knee_angle = _calculate_angle(hip, knee, ankle)
-                hip_angle = _calculate_angle(shoulder, hip, knee)
-                back_angle = _calculate_angle(shoulder, hip, knee)
-
-                theta_knee = math.radians(180 - knee_angle)
-                theta_hip = math.radians(180 - hip_angle)
-
-                F_external = (constants['weight_kg'] * 9.81) / 2 
-                phi_rad = constants['phi']
-                F_parallel = F_external * math.cos(phi_rad)
-
-                tau_knee = F_parallel * constants['r_external']
-                tau_hip = F_parallel * constants['r_external']
-
-                F_quad = _calculate_force(tau_knee, constants['r_quad'], theta_knee)
-                F_glute = _calculate_force(tau_hip, constants['r_glute'], theta_hip)
-                F_hamstring = _calculate_force(tau_hip, constants['r_hamstring_hip'], theta_hip)
-                F_erector_spinae = _calculate_force(tau_hip, constants['r_erector_spinae'], theta_hip)
-
-                delta_L = constants['L0'] * constants['delta_L_ratio']
-                strain = delta_L / constants['L0'] if constants['L0'] != 0 else 0
-
-                E_quad = _calculate_young_modulus(F_quad, constants['L0'], constants['A_quad'], delta_L)
-                E_glute = _calculate_young_modulus(F_glute, constants['L0'], constants['A_glute'], delta_L)
-                E_hamstring = _calculate_young_modulus(F_hamstring, constants['L0'], constants['A_hamstring'], delta_L)
-                E_erector_spinae = _calculate_young_modulus(F_erector_spinae, constants['L0'], constants['A_erector_spinae'], delta_L)
-
-                data_to_display = {
-                    "Knee Angle": int(knee_angle),
-                    "Hip Angle": int(hip_angle),
-                    "Back Angle": int(back_angle),
-                    "Quad F": int(F_quad),
-                    "Glute F": int(F_glute),
-                    "Hamstring F": int(F_hamstring),
-                    "Back F": int(F_erector_spinae),
-                    "Strain": strain * 100, # Convert to percentage
-                    "Quad E": E_quad / 1e6, # Convert to MPa
-                    "Glute E": E_glute / 1e6, # Convert to MPa
-                    "Hamstring E": E_hamstring / 1e6, # Convert to MPa
-                    "Back E": E_erector_spinae / 1e6 # Convert to MPa
-                }
-                
-                log_data_file.append([
-                    time.time() - start_time, knee_angle, hip_angle, back_angle,
-                    F_quad, F_glute, F_hamstring, F_erector_spinae,
-                    strain, E_quad, E_glute, E_hamstring, E_erector_spinae
-                ])
-
-            # Draw landmarks
-            mp.solutions.drawing_utils.draw_landmarks(image_bgr, results.pose_landmarks,
-                                                      mp_pose.POSE_CONNECTIONS,
-                                                      mp.solutions.drawing_utils.DrawingSpec(color=(245,117,66), thickness=2, circle_radius=2),
-                                                      mp.solutions.drawing_utils.DrawingSpec(color=(245,66,230), thickness=2, circle_radius=2)
-                                                     )
-        
-        processed_frames.append(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)) # Store RGB for st.image
-        frame_idx += 1
-        progress_bar.progress(frame_idx / frame_count)
-
-    cap.release()
-    pose.close()
-    os.unlink(video_path) # Clean up temporary file
-    st.success("Video processing complete!")
-    return processed_frames, log_data_file
-
 # --- Streamlit App Layout ---
 def main():
     st.set_page_config(layout="wide", page_title="Real-Time Squat Biomechanics Analysis")
@@ -293,12 +192,25 @@ def main():
     # Initialize ALL session state variables unconditionally at the very top of main()
     if 'constants' not in st.session_state:
         st.session_state.constants = {
-            'A_quad': 0.00006, 'A_glute': 0.00009, 'A_hamstring': 0.00007, 'A_erector_spinae': 0.00003,
-            'L0': 0.10, 'r_quad': 0.04, 'r_glute': 0.07, 'r_hamstring_hip': 0.06, 'r_erector_spinae': 0.05,
-            'r_external': 0.35, 'weight_kg': 100.0, 'phi_deg': 15.0,
-            'phi': math.radians(15.0), # Calculated from phi_deg
-            'delta_L_ratio': 0.08,
-            'age_years': 30
+            'age_years': 30,
+            'weight_kg': 100.0,
+            'femur_length_m': 0.45, # Default average femur length
+            'shin_length_m': 0.40,  # Default average shin length
+            'back_length_m': 0.50,   # Default average back/torso length
+
+            # Reintroduced Advanced Anatomical Constants with their default values
+            'A_quad': 0.00006,          # Physiological cross-sectional area of quadriceps (m²)
+            'A_glute': 0.00009,         # Physiological cross-sectional area of glutes (m²)
+            'A_hamstring': 0.00007,     # Physiological cross-sectional area of hamstrings (m²)
+            'A_erector_spinae': 0.00003,# Physiological cross-sectional area of erector spinae (m²)
+            'L0': 0.10,                 # Resting tendon length (m)
+            'r_quad': 0.04,             # Quadriceps moment arm (m)
+            'r_glute': 0.07,            # Glutes moment arm (m)
+            'r_hamstring_hip': 0.06,    # Hamstring moment arm at hip (m)
+            'r_erector_spinae': 0.05,   # Erector spinae moment arm (m)
+            'phi_deg': 15.0,            # Hip Abduction Angle (deg)
+            'delta_L_ratio': 0.08,      # Ratio of change in tendon length to resting length
+            'r_external': 0.35,         # External Moment Arm (m) - now explicitly here
         }
     if 'log_data' not in st.session_state:
         st.session_state.log_data = []
@@ -311,24 +223,16 @@ def main():
             "Strain": 0,
             "Quad E": 0, "Glute E": 0, "Hamstring E": 0, "Back E": 0
         }
-    if 'processed_video_frames' not in st.session_state:
-        st.session_state.processed_video_frames = []
-    if 'processed_video_log_data' not in st.session_state:
-        st.session_state.processed_video_log_data = []
 
     # Create a local copy of constants to pass to the video processor factory.
+    # This ensures the processor gets the current values of the simplified inputs.
     current_constants = st.session_state.constants.copy()
 
     # --- Sidebar for Controls and Constants ---
     with st.sidebar:
         st.header("⚙️ Settings & Controls")
 
-        analysis_mode = st.radio(
-            "Choose Analysis Mode:",
-            ("Live Camera Analysis", "Upload Video for Analysis")
-        )
-
-        st.subheader("Basic Constants")
+        st.subheader("Basic User Inputs")
         st.session_state.constants['age_years'] = st.number_input(
             "Age (years):", min_value=0, max_value=150, value=st.session_state.constants['age_years'], step=1,
             help="Your age in years. Used to estimate a general physiological strain limit for tendons."
@@ -337,34 +241,54 @@ def main():
             "Weight (kg):", min_value=0.0, value=st.session_state.constants['weight_kg'], step=1.0, format="%.1f",
             help="Enter the total weight being lifted (body weight + barbell weight)."
         )
-        st.session_state.constants['r_external'] = st.number_input(
-            "External Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_external'], step=0.01, format="%.2f",
-            help="Distance from the joint (hip/knee) to the line of action of the external force. Adjust based on barbell position."
+        st.session_state.constants['femur_length_m'] = st.number_input(
+            "Femur Length (m):", min_value=0.01, value=st.session_state.constants['femur_length_m'], step=0.01, format="%.2f",
+            help="Approximate length of your thigh bone (femur) in meters. Used to scale external moment arm."
         )
-        st.session_state.constants['phi_deg'] = st.number_input(
-            "Hip Abduction Angle (deg):", min_value=0.0, max_value=90.0, value=st.session_state.constants['phi_deg'], step=1.0, format="%.1f",
-            help="Angle representing the load's line of action relative to the body's sagital plane. Helps account for non-vertical force components."
+        st.session_state.constants['shin_length_m'] = st.number_input(
+            "Shin Length (m):", min_value=0.01, value=st.session_state.constants['shin_length_m'], step=0.01, format="%.2f",
+            help="Approximate length of your shin bone (tibia/fibula) in meters."
         )
-        st.session_state.constants['phi'] = math.radians(st.session_state.constants['phi_deg']) # Update phi_rad
-
-        st.session_state.constants['r_quad'] = st.number_input(
-            "Quad Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_quad'], step=0.01, format="%.2f",
-            help="Effective moment arm of the quadriceps muscle around the knee joint. A key factor in quadriceps force calculation."
+        st.session_state.constants['back_length_m'] = st.number_input(
+            "Back Length (m):", min_value=0.01, value=st.session_state.constants['back_length_m'], step=0.01, format="%.2f",
+            help="Approximate length of your torso/back in meters (from hip to shoulder)."
         )
-        st.session_state.constants['r_glute'] = st.number_input(
-            "Glute Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_glute'], step=0.01, format="%.2f",
-            help="Effective moment arm of the gluteal muscles around the hip joint. Important for hip extension force."
-        )
-        st.session_state.constants['r_hamstring_hip'] = st.number_input(
-            "Hamstring Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_hamstring_hip'], step=0.01, format="%.2f",
-            help="Effective moment arm of the hamstrings around the hip joint (primarily for hip extension in squat)."
-        )
-        st.session_state.constants['r_erector_spinae'] = st.number_input(
-            "Erector Spinae Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_erector_spinae'], step=0.01, format="%.2f",
-            help="Effective moment arm of the erector spinae (back muscles) around the hip joint, crucial for maintaining torso uprightness."
-        )
-
-        with st.expander("Advanced Anatomical Constants"):
+        
+        # Reintroduced Advanced Anatomical Constants
+        st.markdown("---")
+        with st.expander("Advanced Anatomical Constants (for more precision)"):
+            st.session_state.constants['r_external'] = st.number_input(
+                "External Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_external'], step=0.01, format="%.2f",
+                help="Perpendicular distance from the joint (hip/knee) to the line of action of the external force. Adjust based on barbell position. Overrides femur length scaling if changed."
+            )
+            st.session_state.constants['r_quad'] = st.number_input(
+                "Quad Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_quad'], step=0.01, format="%.2f",
+                help="Effective moment arm of the quadriceps muscle around the knee joint. A key factor in quadriceps force calculation."
+            )
+            st.session_state.constants['r_glute'] = st.number_input(
+                "Glute Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_glute'], step=0.01, format="%.2f",
+                help="Effective moment arm of the gluteal muscles around the hip joint. Important for hip extension force."
+            )
+            st.session_state.constants['r_hamstring_hip'] = st.number_input(
+                "Hamstring Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_hamstring_hip'], step=0.01, format="%.2f",
+                help="Effective moment arm of the hamstrings around the hip joint (primarily for hip extension in squat)."
+            )
+            st.session_state.constants['r_erector_spinae'] = st.number_input(
+                "Erector Spinae Moment Arm (m):", min_value=0.0, value=st.session_state.constants['r_erector_spinae'], step=0.01, format="%.2f",
+                help="Effective moment arm of the erector spinae (back muscles) around the hip joint, crucial for maintaining torso uprightness."
+            )
+            st.session_state.constants['phi_deg'] = st.number_input(
+                "Hip Abduction Angle (deg):", min_value=0.0, max_value=90.0, value=st.session_state.constants['phi_deg'], step=1.0, format="%.1f",
+                help="Angle representing the load's line of action relative to the body's sagital plane. Helps account for non-vertical force components."
+            )
+            st.session_state.constants['delta_L_ratio'] = st.number_input(
+                "Delta L Ratio:", min_value=0.0, max_value=1.0, value=st.session_state.constants['delta_L_ratio'], step=0.01, format="%.2f",
+                help="Ratio of the change in tendon length to the resting length. Directly influences the calculated strain."
+            )
+            st.session_state.constants['L0'] = st.number_input(
+                "Resting Tendon Length (m):", min_value=0.0, value=st.session_state.constants['L0'], step=0.01, format="%.2f",
+                help="Initial, unstretched length of the muscle-tendon unit. Baseline for strain calculation."
+            )
             st.session_state.constants['A_quad'] = st.number_input(
                 "Quad Area (m²):", min_value=0.0, value=st.session_state.constants['A_quad'], step=0.00001, format="%.5f",
                 help="Physiological cross-sectional area of the quadriceps muscle. Larger area generally means higher force potential."
@@ -381,59 +305,23 @@ def main():
                 "Erector Spinae Area (m²):", min_value=0.0, value=st.session_state.constants['A_erector_spinae'], step=0.00001, format="%.5f",
                 help="Physiological cross-sectional area of the erector spinae muscles. Critical for back extensor force."
             )
-            st.session_state.constants['L0'] = st.number_input(
-                "Resting Tendon Length (m):", min_value=0.0, value=st.session_state.constants['L0'], step=0.01, format="%.2f",
-                help="Initial, unstretched length of the muscle-tendon unit. Baseline for strain calculation."
-            )
-            st.session_state.constants['delta_L_ratio'] = st.number_input(
-                "Delta L Ratio:", min_value=0.0, max_value=1.0, value=st.session_state.constants['delta_L_ratio'], step=0.01, format="%.2f",
-                help="Ratio of the change in tendon length to the resting length. Directly influences the calculated strain."
-            )
-
+            
+        st.markdown("---")
         st.subheader("Control Analysis")
-        # Buttons for Live Camera Mode
-        if analysis_mode == "Live Camera Analysis":
-            col1_btn, col2_btn = st.columns(2)
-            with col1_btn:
-                if st.button("Start Live Analysis", key="start_live_btn"):
-                    st.session_state.analysis_running = True
-                    st.session_state.log_data = [] # Clear previous data on start
-                    st.session_state.processed_video_frames = [] # Clear processed video data
-                    st.session_state.processed_video_log_data = []
-                    st.success("Live analysis started! Perform your squats.")
-            with col2_btn:
-                if st.button("Stop Live Analysis", key="stop_live_btn"):
-                    st.session_state.analysis_running = False
-                    st.info("Live analysis stopped. You can now save data.")
-        # Button for Video Upload Mode
-        else: # analysis_mode == "Upload Video for Analysis"
-            uploaded_file = st.file_uploader("Upload a video file (.mp4)", type=["mp4"])
-            if uploaded_file is not None:
-                if st.button("Analyze Uploaded Video", key="analyze_uploaded_video_btn"):
-                    st.session_state.analysis_running = False # Ensure live analysis is off
-                    st.session_state.log_data = [] # Clear live data
-                    st.session_state.processed_video_frames = [] # Clear previous processed video
-                    st.session_state.processed_video_log_data = []
-                    
-                    with st.spinner("Processing video... This may take a while depending on video length."):
-                        processed_frames, processed_log_data = process_video_file(uploaded_file, current_constants)
-                        st.session_state.processed_video_frames = processed_frames
-                        st.session_state.processed_video_log_data = processed_log_data
-                    st.success("Video analysis complete! See results below.")
-            else:
-                st.write("Upload a video to begin analysis.")
-
+        col1_btn, col2_btn = st.columns(2)
+        with col1_btn:
+            if st.button("Start Analysis", key="start_btn"):
+                st.session_state.analysis_running = True
+                st.session_state.log_data = [] # Clear previous data on start
+                st.success("Analysis started! Perform your squats.")
+        with col2_btn:
+            if st.button("Stop Analysis", key="stop_btn"):
+                st.session_state.analysis_running = False
+                st.info("Analysis stopped. You can now save data.")
 
         st.subheader("Save Options")
-        # Determine which log data to use for saving/graphing
-        data_to_save = []
-        if analysis_mode == "Live Camera Analysis" and st.session_state.log_data:
-            data_to_save = st.session_state.log_data
-        elif analysis_mode == "Upload Video for Analysis" and st.session_state.processed_video_log_data:
-            data_to_save = st.session_state.processed_video_log_data
-
-        if data_to_save:
-            df_log = pd.DataFrame(data_to_save, columns=[
+        if st.session_state.log_data:
+            df_log = pd.DataFrame(st.session_state.log_data, columns=[
                 "Time", "Knee Angle (deg)", "Hip Angle (deg)", "Back Angle (deg)",
                 "Quad Force (N)", "Glute Force (N)", "Hamstring Force (N)", "Back Force (N)",
                 "Strain", "Quad Young Modulus (Pa)", "Glute Young Modulus (Pa)",
@@ -448,164 +336,106 @@ def main():
                 help="Download the collected biomechanics data as a CSV file."
             )
             if st.button("Generate & Save Graph", key="graph_btn"):
-                if not st.session_state.analysis_running: # Only generate graph if live analysis is not running
+                if not st.session_state.analysis_running:
                     generate_and_display_graph(df_log, st.session_state.constants['age_years'])
                 else:
-                    st.warning("Please stop the live analysis before generating a graph.")
+                    st.warning("Please stop the analysis before generating a graph.")
         else:
             st.write("No data collected yet to save.")
 
     # --- Main Content Area ---
-    st.subheader("Live Camera Feed / Processed Video & Real-time Data")
+    st.subheader("Live Camera Feed & Real-time Data")
     
     # Use a placeholder for real-time metrics
     metrics_placeholder = st.empty()
-    video_placeholder = st.empty() # Placeholder for video display
 
-    if analysis_mode == "Live Camera Analysis":
-        ctx = webrtc_streamer(
-            key="squat-analysis",
-            video_processor_factory=lambda: SquatBiomechanicsProcessor(current_constants),
-            rtc_configuration={
-                "iceServers": [
-                    {"urls": ["stun:stun.l.google.com:19302"]},
-                    {"urls": ["stun:stun1.l.google.com:19302"]},
-                    {"urls": ["stun:stun2.l.google.com:19302"]},
-                    {"urls": ["stun:stun3.l.google.com:19302"]},
-                    {"urls": ["stun:stun4.l.google.com:19302"]},
-                    {"urls": ["stun:global.stun.twilio.com:3478"]},
-                    {"urls": ["stun:stun.nextcloud.com:3478"]},
-                    {"urls": ["stun:stun.voip.blackberry.com:3478"]},
-                    {"urls": ["stun:stun.sipgate.net:10000"]},
-                    {"urls": ["stun:stun.ekiga.net:3478"]},
-                    {"urls": ["stun:stun.ideasip.com:3478"]},
-                    {"urls": ["stun:stun.schlund.de:3478"]},
-                    {"urls": ["stun:stun.rixtelecom.se:3478"]},
-                    {"urls": ["stun:stun.iptel.org:3478"]},
-                ]
-            },
-            media_stream_constraints={"video": True, "audio": False},
-            async_processing=True,
-        )
+    # Streamlit-WebRTC component for live video
+    ctx = webrtc_streamer(
+        key="squat-analysis",
+        video_processor_factory=lambda: SquatBiomechanicsProcessor(current_constants),
+        rtc_configuration={
+            "iceServers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {"urls": ["stun:stun1.l.google.com:19302"]},
+                {"urls": ["stun:stun2.l.google.com:19302"]},
+                {"urls": ["stun:stun3.l.google.com:19302"]},
+                {"urls": ["stun:stun4.l.google.com:19302"]},
+                {"urls": ["stun:global.stun.twilio.com:3478"]},
+                {"urls": ["stun:stun.nextcloud.com:3478"]},
+                {"urls": ["stun:stun.voip.blackberry.com:3478"]},
+                {"urls": ["stun:stun.sipgate.net:10000"]},
+                {"urls": ["stun:stun.ekiga.net:3478"]},
+                {"urls": ["stun:stun.ideasip.com:3478"]},
+                {"urls": ["stun:stun.schlund.de:3478"]},
+                {"urls": ["stun:stun.rixtelecom.se:3478"]},
+                {"urls": ["stun:stun.iptel.org:3478"]},
+            ]
+        },
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True, # Process frames asynchronously
+    )
 
-        if ctx.state.playing:
-            with metrics_placeholder.container():
-                st.markdown("---")
-                st.subheader("📊 Real-time Biomechanics Data (Live)")
-                display_data = st.session_state.get('data_to_display', {
-                    "Knee Angle": 0, "Hip Angle": 0, "Back Angle": 0,
-                    "Quad F": 0, "Glute F": 0, "Hamstring F": 0, "Back F": 0,
-                    "Strain": 0,
-                    "Quad E": 0, "Glute E": 0, "Hamstring E": 0, "Back E": 0
-                })
-                
-                col_angle1, col_angle2, col_angle3 = st.columns(3)
-                with col_angle1:
-                    st.metric("Knee Angle (deg)", f"{display_data.get('Knee Angle', 'N/A')}")
-                with col_angle2:
-                    st.metric("Hip Angle (deg)", f"{display_data.get('Hip Angle', 'N/A')}")
-                with col_angle3:
-                    st.metric("Back Angle (deg)", f"{display_data.get('Back Angle', 'N/A')}")
-
-                st.markdown("---")
-                col_force1, col_force2, col_force3, col_force4 = st.columns(4)
-                with col_force1:
-                    st.metric("Quad Force (N)", f"{display_data.get('Quad F', 'N/A')}")
-                with col_force2:
-                    st.metric("Glute Force (N)", f"{display_data.get('Glute F', 'N/A')}")
-                with col_force3:
-                    st.metric("Hamstring Force (N)", f"{display_data.get('Hamstring F', 'N/A')}")
-                with col_force4:
-                    st.metric("Back Force (N)", f"{display_data.get('Back F', 'N/A')}")
-                
-                st.markdown("---")
-                st.metric("Strain (%)", f"{display_data.get('Strain', 'N/A'):.2f}")
-
-                st.markdown("---")
-                col_modulus1, col_modulus2, col_modulus3, col_modulus4 = st.columns(4)
-                with col_modulus1:
-                    st.metric("Quad Young Modulus (MPa)", f"{display_data.get('Quad E', 'N/A'):.2f}")
-                with col_modulus2:
-                    st.metric("Glute Young Modulus (MPa)", f"{display_data.get('Glute E', 'N/A'):.2f}")
-                with col_modulus3:
-                    st.metric("Hamstring Young Modulus (MPa)", f"{display_data.get('Hamstring E', 'N/A'):.2f}")
-                with col_modulus4:
-                    st.metric("Back Young Modulus (MPa)", f"{display_data.get('Back E', 'N/A'):.2f}")
-                st.markdown("---")
-        else:
-            st.info("Click 'Start Live Analysis' in the sidebar and allow webcam access to begin.")
-            st.session_state.analysis_running = False
+    # Update real-time metrics in the placeholder
+    if ctx.state.playing:
+        with metrics_placeholder.container():
+            st.markdown("---")
+            st.subheader("📊 Real-time Biomechanics Data")
+            display_data = st.session_state.get('data_to_display', {
+                "Knee Angle": 0, "Hip Angle": 0, "Back Angle": 0,
+                "Quad F": 0, "Glute F": 0, "Hamstring F": 0, "Back F": 0,
+                "Strain": 0,
+                "Quad E": 0, "Glute E": 0, "Hamstring E": 0, "Back E": 0
+            })
+            
+            col_angle1, col_angle2, col_angle3 = st.columns(3)
+            with col_angle1:
+                st.metric("Knee Angle (deg)", f"{display_data.get('Knee Angle', 'N/A')}")
+            with col_angle2:
+                st.metric("Hip Angle (deg)", f"{display_data.get('Hip Angle', 'N/A')}")
+            with col_angle3:
+                st.metric("Back Angle (deg)", f"{display_data.get('Back Angle', 'N/A')}")
 
             st.markdown("---")
-            st.subheader("Troubleshooting Camera Connection")
-            st.write("""
-                If your camera feed is not appearing or you see a "Connection is taking longer than expected" message, please try the following:
-                1.  **Check your internet connection:** Ensure it's stable and strong.
-                2.  **Allow camera access:** Make sure your browser has permission to access your webcam. Look for a pop-up or icon in your browser's address bar.
-                3.  **Close other apps using the camera:** Only one application can use the camera at a time.
-                4.  **Try a different browser:** Sometimes, browser-specific settings can interfere.
-                5.  **Test from a different network:** If possible, try accessing the app from a different Wi-Fi network or a mobile hotspot. Strict network firewalls can block real-time video connections.
-                6.  **Restart the app:** Refresh the Streamlit page in your browser.
-            """)
-    else: # analysis_mode == "Upload Video for Analysis"
-        if st.session_state.processed_video_frames:
-            st.subheader("Processed Video Playback")
-            # Display processed video frames
-            st.image(st.session_state.processed_video_frames[0], channels="RGB", use_column_width=True)
-            # A simple way to "play" the video by iterating through frames
-            # For a more interactive player, you might need a custom component or save to a temp video file.
+            col_force1, col_force2, col_force3, col_force4 = st.columns(4)
+            with col_force1:
+                st.metric("Quad Force (N)", f"{display_data.get('Quad F', 'N/A')}")
+            with col_force2:
+                st.metric("Glute Force (N)", f"{display_data.get('Glute F', 'N/A')}")
+            with col_force3:
+                st.metric("Hamstring Force (N)", f"{display_data.get('Hamstring F', 'N/A')}")
+            with col_force4:
+                st.metric("Back Force (N)", f"{display_data.get('Back F', 'N/A')}")
             
-            st.subheader("📊 Biomechanics Data from Uploaded Video")
-            df_processed_log = pd.DataFrame(st.session_state.processed_video_log_data, columns=[
-                "Time", "Knee Angle (deg)", "Hip Angle (deg)", "Back Angle (deg)",
-                "Quad Force (N)", "Glute Force (N)", "Hamstring Force (N)", "Back Force (N)",
-                "Strain", "Quad Young Modulus (Pa)", "Glute Young Modulus (Pa)",
-                "Hamstring Young Modulus (Pa)", "Back Young Modulus (Pa)"
-            ])
-            st.dataframe(df_processed_log) # Display as a dataframe
+            st.markdown("---")
+            st.metric("Strain (%)", f"{display_data.get('Strain', 'N/A'):.2f}")
 
-            # Display real-time like metrics for the last frame of the processed video
-            if not df_processed_log.empty:
-                display_data = df_processed_log.iloc[-1].to_dict() # Get last row as dict for display
-                st.markdown("---")
-                st.subheader("Last Frame Biomechanics Summary")
-                col_angle1, col_angle2, col_angle3 = st.columns(3)
-                with col_angle1:
-                    st.metric("Knee Angle (deg)", f"{display_data.get('Knee Angle (deg)', 'N/A'):.0f}")
-                with col_angle2:
-                    st.metric("Hip Angle (deg)", f"{display_data.get('Hip Angle (deg)', 'N/A'):.0f}")
-                with col_angle3:
-                    st.metric("Back Angle (deg)", f"{display_data.get('Back Angle (deg)', 'N/A'):.0f}")
+            st.markdown("---")
+            col_modulus1, col_modulus2, col_modulus3, col_modulus4 = st.columns(4)
+            with col_modulus1:
+                st.metric("Quad Young Modulus (MPa)", f"{display_data.get('Quad E', 'N/A'):.2f}")
+            with col_modulus2:
+                st.metric("Glute Young Modulus (MPa)", f"{display_data.get('Glute E', 'N/A'):.2f}")
+            with col_modulus3:
+                st.metric("Hamstring Young Modulus (MPa)", f"{display_data.get('Hamstring E', 'N/A'):.2f}")
+            with col_modulus4:
+                st.metric("Back Young Modulus (MPa)", f"{display_data.get('Back E', 'N/A'):.2f}")
+            st.markdown("---")
+    else:
+        st.info("Click 'Start Analysis' in the sidebar and allow webcam access to begin.")
+        st.session_state.analysis_running = False # Ensure analysis is off if video is not playing
 
-                st.markdown("---")
-                col_force1, col_force2, col_force3, col_force4 = st.columns(4)
-                with col_force1:
-                    st.metric("Quad Force (N)", f"{display_data.get('Quad Force (N)', 'N/A'):.0f}")
-                with col_force2:
-                    st.metric("Glute Force (N)", f"{display_data.get('Glute Force (N)', 'N/A'):.0f}")
-                with col_force3:
-                    st.metric("Hamstring Force (N)", f"{display_data.get('Hamstring Force (N)', 'N/A'):.0f}")
-                with col_force4:
-                    st.metric("Back Force (N)", f"{display_data.get('Back Force (N)', 'N/A'):.0f}")
-                
-                st.markdown("---")
-                st.metric("Strain (%)", f"{display_data.get('Strain', 'N/A'):.2f}")
-
-                st.markdown("---")
-                col_modulus1, col_modulus2, col_modulus3, col_modulus4 = st.columns(4)
-                with col_modulus1:
-                    st.metric("Quad Young Modulus (MPa)", f"{display_data.get('Quad Young Modulus (Pa)', 'N/A') / 1e6:.2f}")
-                with col_modulus2:
-                    st.metric("Glute Young Modulus (MPa)", f"{display_data.get('Glute Young Modulus (Pa)', 'N/A') / 1e6:.2f}")
-                with col_modulus3:
-                    st.metric("Hamstring Young Modulus (MPa)", f"{display_data.get('Hamstring Young Modulus (Pa)', 'N/A') / 1e6:.2f}")
-                with col_modulus4:
-                    st.metric("Back Young Modulus (MPa)", f"{display_data.get('Back Young Modulus (Pa)', 'N/A') / 1e6:.2f}")
-                st.markdown("---")
-
-        else:
-            st.info("Upload a video file in the sidebar to analyze your squat.")
-
+        # Add troubleshooting tips if the camera hasn't started
+        st.markdown("---")
+        st.subheader("Troubleshooting Camera Connection")
+        st.write("""
+            If your camera feed is not appearing or you see a "Connection is taking longer than expected" message, please try the following:
+            1.  **Check your internet connection:** Ensure it's stable and strong.
+            2.  **Allow camera access:** Make sure your browser has permission to access your webcam. Look for a pop-up or icon in your browser's address bar.
+            3.  **Close other apps using the camera:** Only one application can use the camera at a time.
+            4.  **Try a different browser:** Sometimes, browser-specific settings can interfere.
+            5.  **Test from a different network:** If possible, try accessing the app from a different Wi-Fi network or a mobile hotspot. Strict network firewalls can block real-time video connections.
+            6.  **Restart the app:** Refresh the Streamlit page in your browser.
+        """)
 
 def generate_and_display_graph(df_log: pd.DataFrame, age: int):
     """Generates and displays biomechanics graphs."""
