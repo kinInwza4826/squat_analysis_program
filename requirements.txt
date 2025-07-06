@@ -1,8 +1,8 @@
 streamlit
 opencv-python==4.8.0.76
-mediapipe==0.10.11
-numpy==1.23.5
-pandas==2.3.0
-matplotlib==3.8.0
+mediapipe
+numpy
+pandas
+matplotlib
 streamlit-webrtc
 aiortc==1.13.0
