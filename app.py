@@ -37,14 +37,32 @@ def _calculate_force(tau, r, theta):
     # Prevent division by zero or near-zero cosine values which can lead to extreme force estimates
     if r == 0 or math.isclose(math.cos(theta), 0, abs_tol=1e-9): # Use math.isclose for float comparison
         return 0
-    return tau / (r * math.cos(theta))
+    
+    force = tau / (r * math.cos(theta))
+
+    # --- Clipping Force Values for better visualization ---
+    # Forces should generally be positive when muscles are contracting against gravity.
+    # Large negative values or excessively high positive values are often artifacts.
+    # Clip to a reasonable physiological range.
+    min_force = 0 # Muscles generate positive force to counteract load
+    max_force = 100000 # Cap at 100 kN (100,000 N) to prevent extreme spikes
+
+    return np.clip(force, min_force, max_force)
 
 def _calculate_young_modulus(F, L0, A, delta_L):
     """Calculates Young's Modulus based on force, original length, area, and change in length."""
     # Prevent division by zero
     if A * delta_L == 0:
         return 0
-    return (F * L0) / (A * delta_L)
+    
+    young_modulus = (F * L0) / (A * delta_L)
+
+    # --- Clipping Young's Modulus Values for better visualization ---
+    # Young's Modulus should always be positive. Cap at a reasonable upper limit.
+    min_modulus = 0 # Modulus cannot be negative
+    max_modulus = 5000e6 # Cap at 5000 MPa (5 GPa) to prevent extreme spikes (converted to Pa)
+
+    return np.clip(young_modulus, min_modulus, max_modulus)
 
 def _estimate_max_physiological_strain(age):
     """
@@ -184,7 +202,7 @@ class SquatBiomechanicsProcessor(VideoProcessorBase):
 # --- Video File Processor Function ---
 def process_video_file(uploaded_file, constants):
     mp_pose = mp.solutions.pose
-    pose = mp_pose.Pose()
+    pose = mp.solutions.pose.Pose() # Initialize pose here for consistency
 
     tfile = tempfile.NamedTemporaryFile(delete=False)
     tfile.write(uploaded_file.read())
@@ -628,6 +646,15 @@ def generate_and_display_graph(df_log: pd.DataFrame, age: int):
 
     timestamps_raw = df_log.iloc[:, 0].values
     time_elapsed = timestamps_raw - timestamps_raw[0]
+
+    # Apply smoothing to Force and Young's Modulus data
+    # Define columns to smooth (indices 4-7 for Forces, 9-12 for Young's Moduli)
+    # Using a rolling mean with a window of 5 frames
+    smoothing_window = 5 # You can adjust this value (e.g., 3, 7, 9)
+    for col_idx in range(4, 8): # Forces
+        df_log.iloc[:, col_idx] = df_log.iloc[:, col_idx].rolling(window=smoothing_window, min_periods=1, center=True).mean()
+    for col_idx in range(9, 13): # Young's Moduli
+        df_log.iloc[:, col_idx] = df_log.iloc[:, col_idx].rolling(window=smoothing_window, min_periods=1, center=True).mean()
 
     fig, axes = plt.subplots(nrows=4, ncols=1, figsize=(12, 16), sharex=True)
     fig.suptitle('Squat Biomechanics Analysis Over Time', fontsize=16)
