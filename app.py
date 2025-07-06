@@ -383,6 +383,19 @@ def main():
         st.info("Click 'Start Analysis' in the sidebar and allow webcam access to begin.")
         st.session_state.analysis_running = False # Ensure analysis is off if video is not playing
 
+        # Add troubleshooting tips if the camera hasn't started
+        st.markdown("---")
+        st.subheader("Troubleshooting Camera Connection")
+        st.write("""
+            If your camera feed is not appearing or you see a "Connection is taking longer than expected" message, please try the following:
+            1.  **Check your internet connection:** Ensure it's stable and strong.
+            2.  **Allow camera access:** Make sure your browser has permission to access your webcam. Look for a pop-up or icon in your browser's address bar.
+            3.  **Close other apps using the camera:** Only one application can use the camera at a time.
+            4.  **Try a different browser:** Sometimes, browser-specific settings can interfere.
+            5.  **Test from a different network:** If possible, try accessing the app from a different Wi-Fi network or a mobile hotspot. Strict network firewalls can block real-time video connections.
+            6.  **Restart the app:** Refresh the Streamlit page in your browser.
+        """)
+
 def generate_and_display_graph(df_log: pd.DataFrame, age: int):
     """Generates and displays biomechanics graphs."""
     if df_log.shape[0] < 2:
