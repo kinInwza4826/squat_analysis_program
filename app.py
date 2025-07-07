@@ -153,13 +153,19 @@ class SquatBiomechanicsProcessor(VideoProcessorBase):
             F_hamstring = _calculate_force(tau_hip, r_hamstring_hip_derived, theta_hip)
             F_erector_spinae = _calculate_force(tau_hip, r_erector_spinae_derived, theta_hip)
 
-            delta_L = self.constants['L0'] * self.constants['delta_L_ratio']
-            strain = delta_L / self.constants['L0'] if self.constants['L0'] != 0 else 0
+            # Strain is now derived from age-based physiological limit
+            strain_percentage_from_age = _estimate_max_physiological_strain(self.constants['age_years'])
+            strain = strain_percentage_from_age / 100.0 # Convert percentage to ratio for calculations
 
-            E_quad = _calculate_young_modulus(F_quad, self.constants['L0'], self.constants['A_quad'], delta_L)
-            E_glute = _calculate_young_modulus(F_glute, self.constants['L0'], self.constants['A_glute'], delta_L)
-            E_hamstring = _calculate_young_modulus(F_hamstring, self.constants['L0'], self.constants['A_hamstring'], delta_L)
-            E_erector_spinae = _calculate_young_modulus(F_erector_spinae, self.constants['L0'], self.constants['A_erector_spinae'], delta_L)
+            # L0 is still needed for Young's Modulus calculation, but delta_L_ratio is now internal
+            # E_quad = _calculate_young_modulus(F_quad, self.constants['L0'], self.constants['A_quad'], delta_L)
+            # Re-calculate delta_L based on the new strain value for Young's Modulus
+            delta_L_for_modulus = strain * self.constants['L0']
+
+            E_quad = _calculate_young_modulus(F_quad, self.constants['L0'], self.constants['A_quad'], delta_L_for_modulus)
+            E_glute = _calculate_young_modulus(F_glute, self.constants['L0'], self.constants['A_glute'], delta_L_for_modulus)
+            E_hamstring = _calculate_young_modulus(F_hamstring, self.constants['L0'], self.constants['A_hamstring'], delta_L_for_modulus)
+            E_erector_spinae = _calculate_young_modulus(F_erector_spinae, self.constants['L0'], self.constants['A_erector_spinae'], delta_L_for_modulus)
 
             data_to_display = {
                 "Knee Angle": int(knee_angle),
@@ -169,7 +175,7 @@ class SquatBiomechanicsProcessor(VideoProcessorBase):
                 "Glute F": int(F_glute),
                 "Hamstring F": int(F_hamstring),
                 "Back F": int(F_erector_spinae),
-                "Strain": strain * 100, # Convert to percentage
+                "Strain": strain * 100, # Convert to percentage for display
                 "Quad E": E_quad / 1e6, # Convert to MPa
                 "Glute E": E_glute / 1e6, # Convert to MPa
                 "Hamstring E": E_hamstring / 1e6, # Convert to MPa
@@ -280,13 +286,16 @@ def process_video_file(uploaded_file, constants):
                 F_hamstring = _calculate_force(tau_hip, r_hamstring_hip_derived, theta_hip)
                 F_erector_spinae = _calculate_force(tau_hip, r_erector_spinae_derived, theta_hip)
 
-                delta_L = constants['L0'] * constants['delta_L_ratio']
-                strain = delta_L / constants['L0'] if constants['L0'] != 0 else 0
+                # Strain is now derived from age-based physiological limit
+                strain_percentage_from_age = _estimate_max_physiological_strain(constants['age_years'])
+                strain = strain_percentage_from_age / 100.0 # Convert percentage to ratio for calculations
 
-                E_quad = _calculate_young_modulus(F_quad, constants['L0'], constants['A_quad'], delta_L)
-                E_glute = _calculate_young_modulus(F_glute, constants['L0'], constants['A_glute'], delta_L)
-                E_hamstring = _calculate_young_modulus(F_hamstring, constants['L0'], constants['A_hamstring'], delta_L)
-                E_erector_spinae = _calculate_young_modulus(F_erector_spinae, constants['L0'], constants['A_erector_spinae'], delta_L)
+                delta_L_for_modulus = strain * constants['L0']
+
+                E_quad = _calculate_young_modulus(F_quad, constants['L0'], constants['A_quad'], delta_L_for_modulus)
+                E_glute = _calculate_young_modulus(F_glute, constants['L0'], constants['A_glute'], delta_L_for_modulus)
+                E_hamstring = _calculate_young_modulus(F_hamstring, constants['L0'], constants['A_hamstring'], delta_L_for_modulus)
+                E_erector_spinae = _calculate_young_modulus(F_erector_spinae, constants['L0'], constants['A_erector_spinae'], delta_L_for_modulus)
                 
                 log_data_file.append([
                     time.time() - start_time, knee_angle, hip_angle, back_angle,
@@ -327,7 +336,7 @@ def main():
             'r_external': 0.35,
             'phi_deg': 15.0,
             'phi': math.radians(15.0), # Calculated from phi_deg
-            'delta_L_ratio': 0.08,
+            # 'delta_L_ratio': 0.08, # Removed as it's now derived from age
             'A_quad': 0.00006, 'A_glute': 0.00009, 'A_hamstring': 0.00007, 'A_erector_spinae': 0.00003,
             'L0': 0.10,
         }
@@ -348,6 +357,8 @@ def main():
         st.session_state.processed_video_log_data = []
 
     # Create a local copy of constants to pass to the video processor factory.
+    # IMPORTANT: Update delta_L_ratio based on age here before passing to processor
+    st.session_state.constants['delta_L_ratio'] = _estimate_max_physiological_strain(st.session_state.constants['age_years']) / 100.0
     current_constants = st.session_state.constants.copy()
 
     # --- Sidebar for Controls and Constants ---
@@ -394,10 +405,14 @@ def main():
             )
             st.session_state.constants['phi'] = math.radians(st.session_state.constants['phi_deg']) # Update phi_rad
             
-            st.session_state.constants['delta_L_ratio'] = st.number_input(
-                "Delta L Ratio:", min_value=0.0, max_value=1.0, value=st.session_state.constants['delta_L_ratio'], step=0.01, format="%.2f",
-                help="Ratio of the change in tendon length to the resting length. Directly influences the calculated strain."
-            )
+            # Removed delta_L_ratio input as it's now derived from age
+            # st.session_state.constants['delta_L_ratio'] = st.number_input(
+            #     "Delta L Ratio:", min_value=0.0, max_value=1.0, value=st.session_state.constants['delta_L_ratio'], step=0.01, format="%.2f",
+            #     help="Ratio of the change in tendon length to the resting length. Directly influences the calculated strain."
+            # )
+            st.write(f"**Derived Delta L Ratio (from Age):** {st.session_state.constants['delta_L_ratio']:.2f}")
+            st.write(f"*(This means the calculated Strain (%) will match the Estimated Max Strain for your age.)*")
+
             st.session_state.constants['A_quad'] = st.number_input(
                 "Quad Area (m²):", min_value=0.0, value=st.session_state.constants['A_quad'], step=0.00001, format="%.5f",
                 help="Physiological cross-sectional area of the quadriceps muscle. Larger area generally means higher force potential."
@@ -682,14 +697,14 @@ def generate_and_display_graph(df_log: pd.DataFrame, age: int):
 
     # Strain
     ax2 = axes[2]
-    ax2.plot(time_elapsed, df_log.iloc[:, 8] * 100, label="Strain (%)", color='purple')
+    ax2.plot(time_elapsed, df_log.iloc[:, 8] * 100, label="Calculated Strain (%)", color='purple') # Changed label
     ax2.set_ylabel('Strain (%)')
     ax2.grid(True)
     ax2.set_title('Strain')
     
     # Add horizontal line for estimated physiological strain limit
-    max_strain_limit = _estimate_max_physiological_strain(st.session_state.constants['age_years'])
-    ax2.axhline(y=max_strain_limit, color='red', linestyle='--', label=f'Estimated Max Strain for Age {st.session_state.constants["age_years"]}: {max_strain_limit:.1f}%')
+    max_strain_limit = _estimate_max_physiological_strain(age) # Use 'age' parameter directly
+    ax2.axhline(y=max_strain_limit, color='red', linestyle='--', label=f'Estimated Max Strain for Age {age}: {max_strain_limit:.1f}%') # Use 'age' parameter directly
     ax2.legend()
 
     # Young's Moduli
