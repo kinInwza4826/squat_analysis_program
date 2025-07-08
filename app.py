@@ -226,34 +226,6 @@ class BiomechanicsApp(QWidget):
         left_panel_layout = QVBoxLayout()
         left_panel_layout.setSpacing(15) # Spacing between groups
 
-        # How to Use This App Group
-        self.how_to_use_group = QGroupBox("How to Use This App")
-        self.how_to_use_group.setCheckable(True)
-        self.how_to_use_group.setChecked(False) # Start collapsed
-        self.how_to_use_group.toggled.connect(self._toggle_how_to_use_app)
-
-        how_to_use_layout = QVBoxLayout()
-        how_to_use_layout.setContentsMargins(10, 15, 10, 10)
-        how_to_use_layout.setSpacing(8)
-
-        instructions = [
-            "1. **Prepare Your Setup:** Position your webcam to capture a side view of your body. Ensure good lighting and a clear background. Your entire body (from head to toe) should be visible.",
-            "2. **Input Your Data:** Enter your `Age (years)` and `Weight (kg)` in the 'Basic Constants' section. You can expand 'Advanced Anatomical Constants' to fine-tune other parameters.",
-            "3. **Start Analysis:** Click the 'Start Analysis' button. The live camera feed will appear on the right, and real-time data will be displayed on the left.",
-            "4. **Perform Squats:** Perform your squat repetitions in front of the camera. Maintain a consistent side profile for accurate tracking.",
-            "5. **Stop Analysis:** Click the 'Stop Analysis' button when you are finished. The camera feed will stop.",
-            "6. **Review and Save Data:** Use 'Save Data to CSV' to export raw data, or 'Save Data as Graph' to generate and save visual plots of your performance. The strain graph includes an estimated safe limit based on your age.",
-            "7. **Troubleshooting:** If the webcam doesn't open, ensure it's connected and not in use. For poor pose detection, check lighting and body visibility."
-        ]
-
-        for instruction_text in instructions:
-            label = QLabel(instruction_text)
-            label.setWordWrap(True) # Allow text to wrap
-            how_to_use_layout.addWidget(label)
-        
-        self.how_to_use_group.setLayout(how_to_use_layout)
-        left_panel_layout.addWidget(self.how_to_use_group)
-
         # Basic Constants Input Group
         basic_constants_group = QGroupBox("Basic Constants")
         basic_constants_form_layout = QFormLayout()
@@ -263,7 +235,6 @@ class BiomechanicsApp(QWidget):
         self.constant_inputs = {} # Store all inputs, even advanced ones
         
         basic_constant_definitions = [
-            ("Age (years):", 'age_years', "Your age in years. Used to estimate a general physiological strain limit for tendons."),
             ("Weight (kg):", 'weight_kg', "Enter the total weight being lifted (body weight + barbell weight)."),
             ("External Moment Arm (m):", 'r_external', "Distance from the joint (hip/knee) to the line of action of the external force. Adjust based on barbell position."),
             ("Hip Abduction Angle (deg):", 'phi_deg', "Angle representing the load's line of action relative to the body's sagital plane. Helps account for non-vertical force components."),
@@ -275,10 +246,7 @@ class BiomechanicsApp(QWidget):
 
         for label_text, key, tooltip_text in basic_constant_definitions:
             line_edit = QLineEdit(str(self.constants[key]))
-            if key == 'age_years':
-                line_edit.setValidator(QDoubleValidator(0, 150, 0)) # Age usually int, but QDoubleValidator can take 0 decimals
-            else:
-                line_edit.setValidator(QDoubleValidator())
+            line_edit.setValidator(QDoubleValidator())
             line_edit.setToolTip(tooltip_text) # Add tooltip
             basic_constants_form_layout.addRow(label_text, line_edit)
             self.constant_inputs[key] = line_edit
@@ -296,6 +264,7 @@ class BiomechanicsApp(QWidget):
         advanced_constants_form_layout.setSpacing(8)
 
         advanced_constant_definitions = [
+            ("Age (years):", 'age_years', "Your age in years. Used to estimate a general physiological strain limit for tendons."),
             ("Quad Area (m²):", 'A_quad', "Physiological cross-sectional area of the quadriceps muscle. Larger area generally means higher force potential."),
             ("Glute Area (m²):", 'A_glute', "Physiological cross-sectional area of the gluteal muscles. Affects glute force and Young's Modulus."),
             ("Hamstring Area (m²):", 'A_hamstring', "Physiological cross-sectional area of the hamstring muscles. Influences hamstring force contribution."),
@@ -306,7 +275,10 @@ class BiomechanicsApp(QWidget):
 
         for label_text, key, tooltip_text in advanced_constant_definitions:
             line_edit = QLineEdit(str(self.constants[key]))
-            line_edit.setValidator(QDoubleValidator())
+            if key == 'age_years':
+                line_edit.setValidator(QDoubleValidator(0, 150, 0)) # Age usually int, but QDoubleValidator can take 0 decimals
+            else:
+                line_edit.setValidator(QDoubleValidator())
             line_edit.setToolTip(tooltip_text) # Add tooltip
             advanced_constants_form_layout.addRow(label_text, line_edit)
             self.constant_inputs[key] = line_edit # Add to the same dictionary
@@ -388,12 +360,11 @@ class BiomechanicsApp(QWidget):
         # After the layout is set for the main widget, then trigger the collapse
         # This ensures self.layout() is not None when _toggle_advanced_constants is called
         self.advanced_constants_group.setChecked(False) # Start collapsed
-        self.how_to_use_group.setChecked(False) # Start collapsed
 
     def _set_initial_focus(self):
-        # Set focus to the first basic constant input (Age)
-        if 'age_years' in self.constant_inputs:
-            self.constant_inputs['age_years'].setFocus()
+        # Set focus to the first basic constant input
+        if 'weight_kg' in self.constant_inputs: # Reverted to weight_kg as first basic constant
+            self.constant_inputs['weight_kg'].setFocus()
 
     def _toggle_advanced_constants(self, checked):
         # Toggle visibility of all widgets within the advanced_constants_group's layout
@@ -413,26 +384,6 @@ class BiomechanicsApp(QWidget):
         self.advanced_constants_group.adjustSize()
         # Invalidate the parent layout to force recalculation
         if self.layout(): # Check if layout exists before invalidating
-            self.layout().invalidate()
-
-    def _toggle_how_to_use_app(self, checked):
-        # Toggle visibility of all widgets within the how_to_use_group's layout
-        for i in range(self.how_to_use_group.layout().count()):
-            widget = self.how_to_use_group.layout().itemAt(i).widget()
-            if widget:
-                widget.setVisible(checked)
-        
-        # Adjust size policy for collapsing effect
-        if not checked:
-            self.how_to_use_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-            self.how_to_use_group.layout().setContentsMargins(10, 0, 10, 0) # Reduce top/bottom margin when collapsed
-        else:
-            self.how_to_use_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-            self.how_to_use_group.layout().setContentsMargins(10, 15, 10, 10) # Restore padding when expanded
-        # Update layout to reflect changes
-        self.how_to_use_group.adjustSize()
-        # Invalidate the parent layout to force recalculation
-        if self.layout():
             self.layout().invalidate()
 
     def _estimate_max_physiological_strain(self, age):
@@ -520,7 +471,6 @@ class BiomechanicsApp(QWidget):
         for line_edit in self.constant_inputs.values():
             line_edit.setEnabled(False)
         self.advanced_constants_group.setEnabled(False) # Disable toggling advanced constants
-        self.how_to_use_group.setEnabled(False) # Disable toggling how to use app
 
 
     def stop_analysis(self):
@@ -533,7 +483,6 @@ class BiomechanicsApp(QWidget):
         for line_edit in self.constant_inputs.values():
             line_edit.setEnabled(True)
         self.advanced_constants_group.setEnabled(True) # Re-enable toggling
-        self.how_to_use_group.setEnabled(True) # Re-enable toggling
         self.image_label.setText("Analysis stopped.\nClick 'Start Analysis' to begin live camera feed.") # Status message
 
 
