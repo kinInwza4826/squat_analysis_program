@@ -102,7 +102,7 @@ st.set_page_config(layout="wide", page_title="Spinal Biomechanics Analysis")
 
 st.title("🏋️ Real-Time Spinal Biomechanics Analysis")
 st.markdown("Analyze the forces and deformation in the lumbar spine during bending using a simplified biomechanical model and MediaPipe for pose estimation.")
-
+# Removed the placeholder image tag that caused a SyntaxError: 
 ---
 
 # 1. User Input and Controls
@@ -124,17 +124,20 @@ with col_in:
 with col_ctrl:
     # Camera Control Buttons
     st.subheader("Camera Control")
-    is_running = st.button("▶️ Start Camera", key="start_btn")
-    stop_button = st.button("⏹️ Stop/Reset Analysis", key="stop_btn")
-    
-    # State management for running/stopping
+    # Using session state to manage button clicks (run/stop)
     if 'running' not in st.session_state:
         st.session_state.running = False
         st.session_state.history = {'timestamps': [], 'angles': [], 'forces': [], 'deforms': []}
 
-    if is_running:
+    col_start, col_stop = st.columns(2)
+    
+    # Start button logic
+    if col_start.button("▶️ Start Camera", key="start_btn", disabled=st.session_state.running):
         st.session_state.running = True
-    if stop_button:
+        st.session_state.history = {'timestamps': [], 'angles': [], 'forces': [], 'deforms': []} # Reset history on start
+    
+    # Stop button logic
+    if col_stop.button("⏹️ Stop/Reset Analysis", key="stop_btn", disabled=not st.session_state.running):
         st.session_state.running = False
         st.session_state.history = {'timestamps': [], 'angles': [], 'forces': [], 'deforms': []}
 
@@ -152,7 +155,10 @@ chart_placeholder = st.empty()
 # 3. Live Processing Loop (Only runs if 'running' state is True)
 if st.session_state.running:
     
-    st.session_state.history = {'timestamps': [], 'angles': [], 'forces': [], 'deforms': []} # Reset history on start
+    # Initialize/reset history if not running, this is redundant but ensures clean state
+    if not st.session_state.history['timestamps']:
+        st.session_state.history = {'timestamps': [], 'angles': [], 'forces': [], 'deforms': []}
+
     cap = cv2.VideoCapture(0)
     start_time = time.time()
 
@@ -161,7 +167,7 @@ if st.session_state.running:
         while st.session_state.running and cap.isOpened():
             ret, frame = cap.read()
             if not ret:
-                st.warning("Failed to grab frame from camera.")
+                st.warning("Failed to grab frame from camera. Is the camera in use by another app?")
                 st.session_state.running = False
                 break
 
@@ -175,12 +181,14 @@ if st.session_state.running:
             
             # Initialize values for display
             camera_angle, Fv, deformation = 0.0, 0.0, 0.0
+            tracking_status = "Detecting..."
+            color = (0, 0, 255) # Red for initial/lost
 
             if results.pose_landmarks:
                 lm = results.pose_landmarks.landmark
 
-                # Use landmarks from the left side (or average both)
                 try:
+                    # Use landmarks from the left side (or average both)
                     shoulder = (
                         lm[mp_pose.PoseLandmark.LEFT_SHOULDER].x * w_img,
                         lm[mp_pose.PoseLandmark.LEFT_SHOULDER].y * h
@@ -203,6 +211,8 @@ if st.session_state.running:
                     st.session_state.history['forces'].append(Fv)
                     st.session_state.history['deforms'].append(deformation)
                     st.session_state.history['timestamps'].append(t)
+                    tracking_status = "Tracking OK"
+                    color = (0, 255, 0) # Green for OK
 
                     # 4. Draw Skeleton
                     mp_draw.draw_landmarks(
@@ -212,10 +222,13 @@ if st.session_state.running:
                         mp_draw.DrawingSpec(color=(0,255,0), thickness=2),
                         mp_draw.DrawingSpec(color=(255,0,0), thickness=2)
                     )
-                except Exception as e:
-                    # Catch errors if key landmarks are not detected
-                    cv2.putText(frame, "Detection Lost: Move into view", (20,40), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                except Exception:
+                    tracking_status = "Lost: Stand upright and face camera"
+                    color = (0, 165, 255) # Orange for lost
+                    
+            # Add tracking status to the frame
+            cv2.putText(frame, tracking_status, (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
                     
             # 5. Display Frame in Streamlit
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -267,4 +280,3 @@ elif not st.session_state.running:
     video_placeholder.image(np.zeros((480, 640, 3), dtype=np.uint8), caption="Press 'Start Camera' to begin analysis.", use_column_width=True)
     metrics_placeholder.empty()
     chart_placeholder.empty()
-    st.session_state.history = {'timestamps': [], 'angles': [], 'forces': [], 'deforms': []} # Ensure clean reset on stop
