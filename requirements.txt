@@ -1,8 +1,5 @@
-streamlit
-opencv-python-headless==4.8.0.76
+numpy==1.26.4
+opencv-python
 mediapipe
-numpy
-pandas
+streamlit
 matplotlib
-streamlit-webrtc
-aiortc==1.13.0
